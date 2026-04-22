@@ -15,6 +15,7 @@ function connectBinance(sym) {
     ws.binance=w;
     w.onopen=()=>{onConnected('binance');addLog('Binance: connected','info');fetchBinanceHistory(sym,tf);};
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg||!msg.stream)return;
       if(msg.stream.includes('forceOrder'))handleBinanceLiq(msg.data.o);
       else if(msg.stream.includes('kline'))handleBinanceKline(msg.data.k);
@@ -65,6 +66,7 @@ function connectBybit(sym) {
     const w=new WebSocket('wss://stream.bybit.com/v5/public/linear'); ws.bybit=w;
     w.onopen=()=>{onConnected('bybit');w.send(JSON.stringify({op:'subscribe',args:[`allLiquidation.${s}`,`publicTrade.${s}`]}));addLog('Bybit: connected','info');};
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg||!msg.topic)return;
       if(msg.topic.startsWith('allLiquidation')){
         (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{
@@ -95,6 +97,7 @@ function connectOKX(sym) {
       addLog('OKX: connected','info');
     };
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg)return;  // plain "pong" text is silently dropped
       if(msg.arg&&msg.arg.channel==='liquidation-orders'&&msg.data){
         msg.data.forEach(d=>{
@@ -129,6 +132,7 @@ function connectBitget(sym) {
       addLog('Bitget: connected','info');
     };
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg||!msg.arg)return;  // plain "pong" dropped
       if(msg.arg.channel==='liquidation-order'&&msg.data){
         (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{
@@ -162,6 +166,7 @@ function connectGate(sym) {
       addLog('Gate: connected','info');
     };
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg||!msg.channel)return;
       if(msg.channel==='futures.liquidates'&&msg.result){
         const r=Array.isArray(msg.result)?msg.result:[msg.result];
@@ -190,6 +195,7 @@ function connectDydx(sym) {
     const w=new WebSocket('wss://indexer.dydx.trade/v4/ws'); ws.dydx=w;
     w.onopen=()=>{onConnected('dydx');w.send(JSON.stringify({type:'subscribe',channel:'v4_trades',id:s}));addLog('dYdX: connected','info');};
     w.onmessage=(e)=>{
+      if(state.symbol!==sym)return;
       const msg=safeJSON(e.data); if(!msg||!msg.contents)return;
       (msg.contents.trades||[]).forEach(t=>{
         const isBuy=t.side==='BUY', vol=parseFloat(t.size)*parseFloat(t.price);
