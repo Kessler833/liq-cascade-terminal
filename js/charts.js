@@ -135,43 +135,35 @@ function drawDeltaChart() {
   const PAD_T = 4, PAD_B = 4;
   const chartW = W-PAD_L-PAD_R, chartH = H-PAD_T-PAD_B;
   const gap = chartW / visible.length;
+  const barW = Math.max(1, gap*0.65);
 
-  const deltas = visible.map(c=>(state.deltaBars.find(b=>b.t===c.t)||{}).cumDelta||0);
+  // Per-candle orderflow delta (buy vol - sell vol within each bar)
+  const deltas = visible.map(c=>(state.deltaBars.find(b=>b.t===c.t)||{}).delta||0);
   const maxD = Math.max(...deltas.map(v=>Math.abs(v)), 1);
 
   const midY = PAD_T + chartH / 2;
   const halfH = (chartH / 2) * 0.92;
-  const dY = d => midY - (d/maxD)*halfH;
 
   // zero line
   deltaCtx.strokeStyle='#1a1f2e'; deltaCtx.lineWidth=1;
   deltaCtx.beginPath(); deltaCtx.moveTo(PAD_L,midY); deltaCtx.lineTo(W-PAD_R,midY); deltaCtx.stroke();
 
-  // y-axis labels
+  // y-axis label
   deltaCtx.fillStyle='#3d4455'; deltaCtx.font='9px monospace'; deltaCtx.textAlign='left';
   deltaCtx.fillText(formatUSD(maxD), W-PAD_R+6, PAD_T+10);
-  deltaCtx.fillText(formatUSD(-maxD), W-PAD_R+6, H-PAD_B-2);
 
-  if (deltas.length < 2) return;
-
-  // filled area under curve
-  deltaCtx.beginPath();
-  deltaCtx.moveTo(PAD_L + gap/2, dY(deltas[0]));
-  for (let i=1; i<deltas.length; i++) deltaCtx.lineTo(PAD_L + i*gap + gap/2, dY(deltas[i]));
-  deltaCtx.lineTo(PAD_L + (deltas.length-1)*gap + gap/2, midY);
-  deltaCtx.lineTo(PAD_L + gap/2, midY);
-  deltaCtx.closePath();
-  deltaCtx.fillStyle='rgba(0,212,255,0.07)';
-  deltaCtx.fill();
-
-  // colored line segments
-  for (let i=1; i<deltas.length; i++) {
-    const x1=PAD_L+(i-1)*gap+gap/2, y1=dY(deltas[i-1]);
-    const x2=PAD_L+i*gap+gap/2,     y2=dY(deltas[i]);
-    deltaCtx.strokeStyle = deltas[i]>=0 ? '#00d4ff' : '#ff3d5a';
-    deltaCtx.lineWidth=1.5;
-    deltaCtx.beginPath(); deltaCtx.moveTo(x1,y1); deltaCtx.lineTo(x2,y2); deltaCtx.stroke();
-  }
+  visible.forEach((c,i) => {
+    const d = deltas[i];
+    if (d === 0) return;
+    const x = PAD_L + i*gap + gap/2;
+    const h = (Math.abs(d)/maxD)*halfH;
+    deltaCtx.fillStyle = d > 0 ? 'rgba(0,230,118,0.75)' : 'rgba(255,61,90,0.75)';
+    if (d > 0) {
+      deltaCtx.fillRect(x-barW/2, midY-h, barW, h);
+    } else {
+      deltaCtx.fillRect(x-barW/2, midY, barW, h);
+    }
+  });
 }
 
 function updateCharts() {

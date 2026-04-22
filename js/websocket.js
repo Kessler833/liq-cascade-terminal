@@ -108,7 +108,7 @@ function connectOKX(sym) {
       } else if(msg.arg&&msg.arg.channel==='trades'&&msg.data){
         msg.data.forEach(d=>{
           const notional = getTradeNotional('okx', state.symbol, +d.sz, +d.px);
-          updateDelta(d.side==='buy'?-notional:notional, +d.ts);
+          updateDelta(d.side==='buy'?notional:-notional, +d.ts);
         });
       }
     };
