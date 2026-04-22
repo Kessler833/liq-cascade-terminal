@@ -1,3 +1,14 @@
+function applyLiqStore(sym, tf) {
+  const tfMs = TF_MINUTES[tf] * 60000;
+  (liqStore[sym] || []).forEach(ev => {
+    const bT = Math.floor(ev.t / tfMs) * tfMs;
+    let lb = state.liqBars.find(b => b.t === bT);
+    if (!lb) { lb = {t:bT,longUsd:0,shortUsd:0}; state.liqBars.push(lb); state.liqBars.sort((a,b)=>a.t-b.t); }
+    if (ev.side === 'long') lb.longUsd += ev.usdVal;
+    else lb.shortUsd += ev.usdVal;
+  });
+}
+
 function updateCandle(c, isClosed) {
   const idx = state.candles.findIndex(x=>x.t===c.t);
   if (idx>=0) { state.candles[idx]={...state.candles[idx],...c}; if(isClosed)state.candles[idx].closed=true; }
@@ -11,6 +22,7 @@ function updateCandle(c, isClosed) {
 }
 
 function updateDelta(volDelta, ts) {
+  if (!isFinite(volDelta) || volDelta === 0) return;
   state.cumulativeDelta += volDelta;
   const tfMs = TF_MINUTES[state.timeframe]*60000;
   const bT = Math.floor(ts/tfMs)*tfMs;
@@ -31,6 +43,8 @@ function updateDelta(volDelta, ts) {
 function onLiquidation(exchange, side, usdVal, price, symbol) {
   if (usdVal<100) return;
   const now = Date.now();
+  // Persist raw event so it survives TF/symbol switches
+  liqStore[state.symbol].push({ t: now, exchange, side, usdVal, price });
   state.totalLiq+=usdVal; state.totalLiqEvents++;
   if (side==='long') { state.longsLiqUsd+=usdVal; state.longsLiqEvents++; } else { state.shortsLiqUsd+=usdVal; state.shortsLiqEvents++; }
   state.exchanges[exchange][side]+=usdVal;

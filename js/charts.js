@@ -1,20 +1,31 @@
 const candleCanvas = document.getElementById('candle-canvas');
 const ctx = candleCanvas.getContext('2d');
+const liqCanvas = document.getElementById('liq-canvas');
+const liqCtx = liqCanvas.getContext('2d');
+const deltaCanvas = document.getElementById('delta-canvas');
+const deltaCtx = deltaCanvas.getContext('2d');
+
+// Shared horizontal layout — must match across all three charts
+const PAD_L = 8, PAD_R = 65;
 
 function resizeCanvas() {
-  const container = document.getElementById('candle-container');
   const dpr = window.devicePixelRatio || 1;
-  const w = container.clientWidth, h = container.clientHeight;
-  candleCanvas.width = w * dpr; candleCanvas.height = h * dpr;
-  candleCanvas.style.width = w + 'px'; candleCanvas.style.height = h + 'px';
-  ctx.scale(dpr, dpr);
-  drawCandleChart();
+  function fit(canvas, container) {
+    const w = container.clientWidth, h = container.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    canvas.getContext('2d').scale(dpr, dpr);
+  }
+  fit(candleCanvas, document.getElementById('candle-container'));
+  fit(liqCanvas,    document.getElementById('liq-container'));
+  fit(deltaCanvas,  document.getElementById('delta-container'));
+  drawCandleChart(); drawLiqChart(); drawDeltaChart();
 }
 
 function drawCandleChart() {
   const W = candleCanvas.clientWidth, H = candleCanvas.clientHeight;
   ctx.clearRect(0,0,W,H);
-  const PAD_L=8, PAD_R=65, PAD_T=36, PAD_B=28;
+  const PAD_T=36, PAD_B=28;
   const visible = getVisibleCandles();
   if (!visible.length) {
     ctx.fillStyle='#3d4455'; ctx.font='13px Satoshi,sans-serif'; ctx.textAlign='center';
@@ -74,59 +85,97 @@ function drawCandleChart() {
   }
 }
 
-const liqCtx = document.getElementById('liq-canvas').getContext('2d');
-let liqChart;
-function initLiqChart() {
-  if (liqChart) liqChart.destroy();
-  liqChart = new Chart(liqCtx, {
-    type:'bar', data:{ labels:[], datasets:[
-      {label:'Long Liq',data:[],backgroundColor:'rgba(0,176,80,0.7)',borderColor:'transparent',barPercentage:0.9,categoryPercentage:1.0,stack:'liq'},
-      {label:'Short Liq',data:[],backgroundColor:'rgba(204,32,64,0.7)',borderColor:'transparent',barPercentage:0.9,categoryPercentage:1.0,stack:'liq'}
-    ]},
-    options:{ responsive:true, maintainAspectRatio:false, animation:false,
-      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(c)=>` ${c.dataset.label}: ${formatUSD(Math.abs(c.raw))}`, title:(it)=>new Date(it[0].label).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) }, backgroundColor:'#0e1014',borderColor:'#1f2430',borderWidth:1,titleColor:'#7a8499',bodyColor:'#e2e8f0',padding:8 }},
-      scales:{ x:{display:false,stacked:true}, y:{ stacked:false, grid:{color:'#1a1f2e',lineWidth:1}, ticks:{color:'#3d4455',font:{size:9},callback:v=>formatUSD(Math.abs(v))}, border:{display:false} } }
+function drawLiqChart() {
+  const W = liqCanvas.clientWidth, H = liqCanvas.clientHeight;
+  liqCtx.clearRect(0,0,W,H);
+  const visible = getVisibleCandles();
+  if (!visible.length) return;
+
+  const PAD_T = 4, PAD_B = 4;
+  const chartW = W-PAD_L-PAD_R, chartH = H-PAD_T-PAD_B;
+  const gap = chartW / visible.length;
+  const barW = Math.max(1, gap*0.65);
+
+  const liqLongs  = visible.map(c=>(state.liqBars.find(b=>b.t===c.t)||{}).longUsd||0);
+  const liqShorts = visible.map(c=>(state.liqBars.find(b=>b.t===c.t)||{}).shortUsd||0);
+  const maxLiq = Math.max(...liqLongs, ...liqShorts, 1);
+
+  const midY = PAD_T + chartH / 2;
+  const halfH = (chartH / 2) * 0.92;
+
+  // center zero line
+  liqCtx.strokeStyle='#1a1f2e'; liqCtx.lineWidth=1;
+  liqCtx.beginPath(); liqCtx.moveTo(PAD_L,midY); liqCtx.lineTo(W-PAD_R,midY); liqCtx.stroke();
+
+  // y-axis label
+  liqCtx.fillStyle='#3d4455'; liqCtx.font='9px monospace'; liqCtx.textAlign='left';
+  liqCtx.fillText(formatUSD(maxLiq), W-PAD_R+6, PAD_T+10);
+
+  visible.forEach((c,i) => {
+    const x = PAD_L + i*gap + gap/2;
+    if (liqLongs[i]>0) {
+      const h = (liqLongs[i]/maxLiq)*halfH;
+      liqCtx.fillStyle='rgba(0,176,80,0.7)';
+      liqCtx.fillRect(x-barW/2, midY-h, barW, h);
+    }
+    if (liqShorts[i]>0) {
+      const h = (liqShorts[i]/maxLiq)*halfH;
+      liqCtx.fillStyle='rgba(204,32,64,0.7)';
+      liqCtx.fillRect(x-barW/2, midY, barW, h);
     }
   });
 }
 
-const deltaCtx = document.getElementById('delta-canvas').getContext('2d');
-let deltaChart;
-function initDeltaChart() {
-  if (deltaChart) deltaChart.destroy();
-  deltaChart = new Chart(deltaCtx, {
-    type:'line', data:{ labels:[], datasets:[{ label:'Cumulative Delta', data:[],
-      borderColor:'#00d4ff', backgroundColor:(c)=>{ const ch=c.chart,{ctx:cc,chartArea:ca}=ch; if(!ca)return'transparent'; const g=cc.createLinearGradient(0,ca.top,0,ca.bottom); g.addColorStop(0,'rgba(0,212,255,0.2)'); g.addColorStop(0.5,'rgba(0,212,255,0.03)'); g.addColorStop(1,'rgba(255,61,90,0.03)'); return g; },
-      borderWidth:1.5, fill:'origin', pointRadius:0, pointHoverRadius:3, tension:0.3,
-      segment:{ borderColor:(c)=>c.p0.parsed.y>=0?'#00d4ff':'#ff3d5a' }
-    }]},
-    options:{ responsive:true, maintainAspectRatio:false, animation:false,
-      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(c)=>` Delta: ${c.raw>0?'+':''}${formatUSD(c.raw)}`, title:(it)=>new Date(it[0].label).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) }, backgroundColor:'#0e1014',borderColor:'#1f2430',borderWidth:1,titleColor:'#7a8499',bodyColor:'#e2e8f0',padding:8 }},
-      scales:{ x:{display:false}, y:{ grid:{color:'#1a1f2e',lineWidth:1}, ticks:{color:'#3d4455',font:{size:9},callback:v=>formatUSD(v)}, border:{display:false} } }
-    }
-  });
+function drawDeltaChart() {
+  const W = deltaCanvas.clientWidth, H = deltaCanvas.clientHeight;
+  deltaCtx.clearRect(0,0,W,H);
+  const visible = getVisibleCandles();
+  if (!visible.length) return;
+
+  const PAD_T = 4, PAD_B = 4;
+  const chartW = W-PAD_L-PAD_R, chartH = H-PAD_T-PAD_B;
+  const gap = chartW / visible.length;
+
+  const deltas = visible.map(c=>(state.deltaBars.find(b=>b.t===c.t)||{}).cumDelta||0);
+  const maxD = Math.max(...deltas.map(v=>Math.abs(v)), 1);
+
+  const midY = PAD_T + chartH / 2;
+  const halfH = (chartH / 2) * 0.92;
+  const dY = d => midY - (d/maxD)*halfH;
+
+  // zero line
+  deltaCtx.strokeStyle='#1a1f2e'; deltaCtx.lineWidth=1;
+  deltaCtx.beginPath(); deltaCtx.moveTo(PAD_L,midY); deltaCtx.lineTo(W-PAD_R,midY); deltaCtx.stroke();
+
+  // y-axis labels
+  deltaCtx.fillStyle='#3d4455'; deltaCtx.font='9px monospace'; deltaCtx.textAlign='left';
+  deltaCtx.fillText(formatUSD(maxD), W-PAD_R+6, PAD_T+10);
+  deltaCtx.fillText(formatUSD(-maxD), W-PAD_R+6, H-PAD_B-2);
+
+  if (deltas.length < 2) return;
+
+  // filled area under curve
+  deltaCtx.beginPath();
+  deltaCtx.moveTo(PAD_L + gap/2, dY(deltas[0]));
+  for (let i=1; i<deltas.length; i++) deltaCtx.lineTo(PAD_L + i*gap + gap/2, dY(deltas[i]));
+  deltaCtx.lineTo(PAD_L + (deltas.length-1)*gap + gap/2, midY);
+  deltaCtx.lineTo(PAD_L + gap/2, midY);
+  deltaCtx.closePath();
+  deltaCtx.fillStyle='rgba(0,212,255,0.07)';
+  deltaCtx.fill();
+
+  // colored line segments
+  for (let i=1; i<deltas.length; i++) {
+    const x1=PAD_L+(i-1)*gap+gap/2, y1=dY(deltas[i-1]);
+    const x2=PAD_L+i*gap+gap/2,     y2=dY(deltas[i]);
+    deltaCtx.strokeStyle = deltas[i]>=0 ? '#00d4ff' : '#ff3d5a';
+    deltaCtx.lineWidth=1.5;
+    deltaCtx.beginPath(); deltaCtx.moveTo(x1,y1); deltaCtx.lineTo(x2,y2); deltaCtx.stroke();
+  }
 }
 
 function updateCharts() {
-  const visible = getVisibleCandles();
-  if (!visible.length) { drawCandleChart(); return; }
-  const labels = visible.map(c=>c.t);
-  const liqLongs = visible.map(c=>(state.liqBars.find(b=>b.t===c.t)||{}).longUsd||0);
-  const liqShorts = visible.map(c=>-((state.liqBars.find(b=>b.t===c.t)||{}).shortUsd||0));
-  const deltas = visible.map(c=>(state.deltaBars.find(b=>b.t===c.t)||{}).cumDelta||0);
-  if (liqChart) {
-    liqChart.data.labels=labels;
-    liqChart.data.datasets[0].data=liqLongs;
-    liqChart.data.datasets[1].data=liqShorts;
-    const maxLiq=Math.max(...liqLongs.map(v=>Math.abs(v)),...liqShorts.map(v=>Math.abs(v)),1);
-    liqChart.options.scales.y.min=-maxLiq*1.1; liqChart.options.scales.y.max=maxLiq*1.1;
-    liqChart.update('none');
-  }
-  if (deltaChart) {
-    deltaChart.data.labels=labels; deltaChart.data.datasets[0].data=deltas;
-    const maxD=Math.max(...deltas.map(v=>Math.abs(v)),1);
-    deltaChart.options.scales.y.min=-maxD*1.1; deltaChart.options.scales.y.max=maxD*1.1;
-    deltaChart.update('none');
-  }
   drawCandleChart();
+  drawLiqChart();
+  drawDeltaChart();
 }

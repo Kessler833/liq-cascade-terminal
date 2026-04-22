@@ -32,6 +32,6 @@ setInterval(fetchTicker, 30000);
 setInterval(fetchOI, 60000);
 
 addLog('Terminal initialized. Connecting to exchanges...','info');
-initLiqChart(); initDeltaChart(); resizeCanvas();
+resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 connectAll();

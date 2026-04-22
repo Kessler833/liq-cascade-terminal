@@ -22,3 +22,6 @@ const MAX_CANDLES = 500;
 const FEED_MAX = 80;
 
 let ws = {};
+
+// Persistent per-symbol liq event store — never cleared on TF/symbol changes
+const liqStore = { BTC: [], ETH: [], SOL: [] };

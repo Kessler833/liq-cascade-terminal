@@ -111,6 +111,7 @@ document.querySelectorAll('.sym-tab').forEach(btn=>{
   btn.addEventListener('click',()=>{
     document.querySelectorAll('.sym-tab').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active'); state.symbol=btn.dataset.sym;
+    // liqBars will be rebuilt from liqStore by fetchBinanceHistory
     state.candles=[];state.liqBars=[];state.deltaBars=[];state.price=0;state.cumulativeDelta=0;state.prevCumulativeDelta=0;
     Object.keys(state.exchanges).forEach(k=>{state.exchanges[k]={long:0,short:0};});
     Object.values(ws).forEach(w=>{try{w.close();}catch(e){}});
@@ -124,6 +125,7 @@ document.querySelectorAll('.tf-tab').forEach(btn=>{
   btn.addEventListener('click',()=>{
     document.querySelectorAll('.tf-tab').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active'); state.timeframe=btn.dataset.tf;
+    // liqBars will be rebuilt from liqStore (with new TF bucketing) by fetchBinanceHistory
     state.candles=[];state.liqBars=[];state.deltaBars=[];state.cumulativeDelta=0;state.prevCumulativeDelta=0;
     Object.values(ws).forEach(w=>{try{w.close();}catch(e){}});
     ws={};
