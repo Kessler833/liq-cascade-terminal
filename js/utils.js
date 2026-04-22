@@ -27,3 +27,9 @@ function getVisibleCandles() {
   const start = Math.max(0, end - state.viewWidth);
   return all.slice(start, end);
 }
+
+// Normalize trade size to USDT notional, accounting for each exchange's contract specs
+function getTradeNotional(exchange, symbol, size, price) {
+  const contractSize = CONTRACT_SIZES[symbol]?.[exchange] || 1;
+  return size * contractSize * price;
+}
