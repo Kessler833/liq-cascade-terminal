@@ -52,6 +52,7 @@ async function fetchBinanceHistory(sym, tf) {
     // Build liqBars from fresh candle set, then overlay persisted events
     state.liqBars=state.candles.map(c=>({t:c.t,longUsd:0,shortUsd:0}));
     applyLiqStore(sym, tf);
+    applyDeltaStore(sym, tf);
     if (state.candles.length) { state.price=state.candles[state.candles.length-1].c; updatePriceDisplay(); }
     document.getElementById('sbCandles').textContent=state.candles.length;
     updateCharts(); addLog(`Loaded ${state.candles.length} historical candles`,'info');

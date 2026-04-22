@@ -26,7 +26,8 @@ let ws = {};
 // Persistent per-symbol liq event store — never cleared on TF/symbol changes
 const liqStore = { BTC: [], ETH: [], SOL: [] };
 
-// Contract sizes (in base asset per contract) for normalizing trade volumes across exchanges
+// Persistent per-symbol delta store at 1m granularity — re-buckets into any TF
+const deltaStore = { BTC: [], ETH: [], SOL: [] };
 const CONTRACT_SIZES = {
   BTC: { binance: 1, bybit: 1, okx: 0.01, bitget: 0.01, gate: 0.01, dydx: 1 },
   ETH: { binance: 1, bybit: 1, okx: 0.1,  bitget: 0.1,  gate: 0.1,  dydx: 1 },

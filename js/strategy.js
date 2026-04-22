@@ -21,9 +21,36 @@ function updateCandle(c, isClosed) {
   document.getElementById('sbCandles').textContent=state.candles.length;
 }
 
+function applyDeltaStore(sym, tf) {
+  const tfMs = TF_MINUTES[tf] * 60000;
+  // Aggregate stored 1m buckets into target TF
+  const grouped = {};
+  (deltaStore[sym] || []).slice().sort((a,b)=>a.t-b.t).forEach(b => {
+    const bT = Math.floor(b.t / tfMs) * tfMs;
+    grouped[bT] = (grouped[bT] || 0) + b.delta;
+  });
+  // Walk in time order, building cumDelta and writing into deltaBars
+  let cum = 0;
+  Object.keys(grouped).sort((a,b)=>+a-+b).forEach(t => {
+    cum += grouped[t];
+    let db = state.deltaBars.find(b => b.t === +t);
+    if (!db) { db = {t:+t, delta:0, cumDelta:0}; state.deltaBars.push(db); }
+    db.delta += grouped[t];
+    db.cumDelta = cum;
+  });
+  state.deltaBars.sort((a,b)=>a.t-b.t);
+  if (cum !== 0) { state.cumulativeDelta = cum; state.prevCumulativeDelta = cum; }
+}
+
 function updateDelta(volDelta, ts) {
   if (!isFinite(volDelta) || volDelta === 0) return;
   state.cumulativeDelta += volDelta;
+  // Persist at 1m resolution so it survives TF/symbol switches
+  const bT1m = Math.floor(ts / 60000) * 60000;
+  let sb = deltaStore[state.symbol].find(b => b.t === bT1m);
+  if (!sb) { sb = {t: bT1m, delta: 0}; deltaStore[state.symbol].push(sb); }
+  sb.delta += volDelta;
+  // Current TF bucket
   const tfMs = TF_MINUTES[state.timeframe]*60000;
   const bT = Math.floor(ts/tfMs)*tfMs;
   let db = state.deltaBars.find(b=>b.t===bT);
