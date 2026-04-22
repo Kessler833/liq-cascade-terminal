@@ -26,7 +26,8 @@ function connectBinance(sym) {
 }
 
 function handleBinanceLiq(o) {
-  const side=o.S==='BUY'?'long':'short';
+  // BUY order = exchange buying to close a SHORT position
+  const side = o.S === 'BUY' ? 'short' : 'long';
   const usd=parseFloat(o.q)*parseFloat(o.ap||o.p);
   onLiquidation('binance',side,usd,parseFloat(o.ap||o.p),o.s);
 }
@@ -61,17 +62,14 @@ function connectBybit(sym) {
   const s=SYMBOL_MAP[sym].bybit; setDot('bybit','connecting');
   try {
     const w=new WebSocket('wss://stream.bybit.com/v5/public/linear'); ws.bybit=w;
-    w.onopen=()=>{onConnected('bybit');w.send(JSON.stringify({op:'subscribe',args:[`allLiquidation.${s}`,`publicTrade.${s}`]}));addLog('Bybit: connected','info');};
+    w.onopen=()=>{onConnected('bybit');w.send(JSON.stringify({op:'subscribe',args:[`allLiquidation.${s}`]}));addLog('Bybit: connected','info');};
     w.onmessage=(e)=>{
       const msg=safeJSON(e.data); if(!msg||!msg.topic)return;
       if(msg.topic.startsWith('allLiquidation')){
         (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{
-          const side=d.S==='Buy'?'long':'short';
+          // Buy order = exchange buying to close a SHORT position
+          const side=d.S==='Buy'?'short':'long';
           onLiquidation('bybit',side,parseFloat(d.v)*parseFloat(d.p),parseFloat(d.p),d.s);
-        });
-      } else if(msg.topic.startsWith('publicTrade')){
-        (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{
-          updateDelta(d.S==='Buy'?+d.v*+d.p:-+d.v*+d.p,d.T);
         });
       }
     };
@@ -87,7 +85,7 @@ function connectOKX(sym) {
     const w=new WebSocket('wss://ws.okx.com:8443/ws/v5/public'); ws.okx=w;
     w.onopen=()=>{
       onConnected('okx');
-      w.send(JSON.stringify({op:'subscribe',args:[{channel:'liquidation-orders',instType:'SWAP'},{channel:'trades',instId:s}]}));
+      w.send(JSON.stringify({op:'subscribe',args:[{channel:'liquidation-orders',instType:'SWAP'}]}));
       addLog('OKX: connected','info');
     };
     w.onmessage=(e)=>{
@@ -96,13 +94,12 @@ function connectOKX(sym) {
         msg.data.forEach(d=>{
           if(d.instId!==s)return;
           (d.details||[]).forEach(det=>{
-            const side=(det.posSide==='long'||det.side==='buy')?'long':'short';
+            // posSide tells us the position type directly; fallback: sell order closes long
+            const side=det.posSide==='long'?'long':det.posSide==='short'?'short':det.side==='sell'?'long':'short';
             const usd=parseFloat(det.sz)*parseFloat(det.bkPx||det.px||0);
             if(usd>0)onLiquidation('okx',side,usd,parseFloat(det.bkPx||det.px),s);
           });
         });
-      } else if(msg.arg&&msg.arg.channel==='trades'&&msg.data){
-        msg.data.forEach(d=>{updateDelta(d.side==='buy'?+d.sz*+d.px:-+d.sz*+d.px,+d.ts);});
       }
     };
     w.onclose=()=>{onDisconnected('okx');reconnect('OKX',()=>connectOKX(sym));};
@@ -117,19 +114,18 @@ function connectBitget(sym) {
     const w=new WebSocket('wss://ws.bitget.com/v2/ws/public'); ws.bitget=w;
     w.onopen=()=>{
       onConnected('bitget');
-      w.send(JSON.stringify({op:'subscribe',args:[{instType:'USDT-FUTURES',channel:'liquidation-order',instId:s},{instType:'USDT-FUTURES',channel:'trade',instId:s}]}));
+      w.send(JSON.stringify({op:'subscribe',args:[{instType:'USDT-FUTURES',channel:'liquidation-order',instId:s}]}));
       addLog('Bitget: connected','info');
     };
     w.onmessage=(e)=>{
       const msg=safeJSON(e.data); if(!msg||!msg.arg)return;  // plain "pong" dropped
       if(msg.arg.channel==='liquidation-order'&&msg.data){
         (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{
-          const side=(d.side==='buy'||d.posSide==='long')?'long':'short';
+          // posSide tells us the position type directly; fallback: sell order closes long
+          const side=d.posSide==='long'?'long':d.posSide==='short'?'short':d.side==='sell'?'long':'short';
           const usd=parseFloat(d.sz||d.size||0)*parseFloat(d.fillPx||d.price||0);
           if(usd>0)onLiquidation('bitget',side,usd,parseFloat(d.fillPx||d.price),s);
         });
-      } else if(msg.arg.channel==='trade'&&msg.data){
-        (Array.isArray(msg.data)?msg.data:[msg.data]).forEach(d=>{updateDelta(d.side==='buy'?+d.sz*+d.price:-+d.sz*+d.price,+d.ts);});
       }
     };
     w.onclose=()=>{onDisconnected('bitget');reconnect('Bitget',()=>connectBitget(sym));};
@@ -146,7 +142,6 @@ function connectGate(sym) {
       onConnected('gate');
       const t=Math.floor(Date.now()/1000);
       w.send(JSON.stringify({time:t,channel:'futures.liquidates',event:'subscribe',payload:[s]}));
-      w.send(JSON.stringify({time:t,channel:'futures.trades',event:'subscribe',payload:[s]}));
       addLog('Gate: connected','info');
     };
     w.onmessage=(e)=>{
@@ -160,7 +155,7 @@ function connectGate(sym) {
         });
       } else if(msg.channel==='futures.trades'&&msg.result){
         const r=Array.isArray(msg.result)?msg.result:[msg.result];
-        r.forEach(d=>{updateDelta(d.size>0?Math.abs(d.size)*d.price:-Math.abs(d.size)*d.price,d.create_time*1000);});
+        // Gate size is in contracts (not base asset) — not usable for USD delta without contract spec
       }
     };
     w.onclose=()=>{onDisconnected('gate');reconnect('Gate',()=>connectGate(sym));};
@@ -178,7 +173,6 @@ function connectDydx(sym) {
       const msg=safeJSON(e.data); if(!msg||!msg.contents)return;
       (msg.contents.trades||[]).forEach(t=>{
         const isBuy=t.side==='BUY', vol=parseFloat(t.size)*parseFloat(t.price);
-        updateDelta(isBuy?vol:-vol,new Date(t.createdAt).getTime());
         if(vol>50000)onLiquidation('dydx',isBuy?'short':'long',vol*0.08,parseFloat(t.price),s);
       });
     };
