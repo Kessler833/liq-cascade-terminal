@@ -1,16 +1,17 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 :: ── liq-cascade-terminal launcher ──────────────────────────────────────────
-:: Serves the static frontend on your LAN IP so any device on the network
-:: can open it.  Tries Python first, falls back to Node (npx serve).
+:: Starts FastAPI backend (port 8000) + Vite frontend (port 5173)
+:: both bound to your LAN IP so any device on the network can connect.
 :: ────────────────────────────────────────────────────────────────────────────
 
-set PORT=8420
+set BACKEND_PORT=8000
+set FRONTEND_PORT=5173
 
 cd /d "%~dp0"
 
-:: ── Resolve LAN IP (first non-loopback IPv4 on the active adapter) ─────────
+:: ── Resolve LAN IP ──────────────────────────────────────────────────────────
 for /f "tokens=2 delims=:" %%a in (
     'ipconfig ^| findstr /R /C:"IPv4.*192\." /C:"IPv4.*10\." /C:"IPv4.*172\."'
 ) do (
@@ -20,40 +21,44 @@ for /f "tokens=2 delims=:" %%a in (
 :got_ip
 
 if not defined LAN_IP (
-    echo.
-    echo  [warn]  Could not detect a LAN IP. Falling back to 0.0.0.0
-    echo.
+    echo  [warn]  Could not detect LAN IP ^— falling back to 0.0.0.0
     set LAN_IP=0.0.0.0
 )
 
-set URL=http://%LAN_IP%:%PORT%
+echo.
+echo  ╔══════════════════════════════════════════════════════╗
+echo  ║         LIQ CASCADE TERMINAL  ^|  LAN launcher       ║
+echo  ╠══════════════════════════════════════════════════════╣
+echo  ║  Backend   http://%LAN_IP%:%BACKEND_PORT%
+echo  ║  Frontend  http://%LAN_IP%:%FRONTEND_PORT%
+echo  ╚══════════════════════════════════════════════════════╝
+echo.
+
+:: ── Backend window ──────────────────────────────────────────────────────────
+echo  [1/2]  Starting backend...
+start "LiqTerm Backend" cmd /k ^
+  "cd /d "%~dp0backend" ^&^& ^
+   if not exist .venv python -m venv .venv ^&^& ^
+   call .venv\Scripts\activate.bat ^&^& ^
+   pip install -q -r requirements.txt ^&^& ^
+   uvicorn main:app --host 0.0.0.0 --port %BACKEND_PORT% --reload"
+
+:: Give backend 3 seconds to boot before frontend starts
+timeout /t 3 /nobreak >nul
+
+:: ── Frontend window ─────────────────────────────────────────────────────────
+echo  [2/2]  Starting frontend...
+start "LiqTerm Frontend" cmd /k ^
+  "cd /d "%~dp0frontend" ^&^& ^
+   npm install --silent ^&^& ^
+   npx vite --host 0.0.0.0 --port %FRONTEND_PORT%"
+
+:: ── Open browser ────────────────────────────────────────────────────────────
+timeout /t 4 /nobreak >nul
+start "" "http://%LAN_IP%:%FRONTEND_PORT%"
 
 echo.
-echo  [liq-cascade-terminal]  Binding to %URL%
-echo  [liq-cascade-terminal]  Open this on any device on your network.
-echo.
-
-:: ── Check for Python ────────────────────────────────────────────────────────
-python --version >nul 2>&1
-if %errorlevel% == 0 (
-    echo  [server]  Using Python http.server
-    start "" "%URL%"
-    python -m http.server %PORT% --bind %LAN_IP%
-    goto :eof
-)
-
-:: ── Fallback: Node / npx serve ───────────────────────────────────────────────
-where node >nul 2>&1
-if %errorlevel% == 0 (
-    echo  [server]  Python not found – using npx serve
-    start "" "%URL%"
-    npx serve -l tcp://%LAN_IP%:%PORT% .
-    goto :eof
-)
-
-:: ── Neither found ─────────────────────────────────────────────────────────
-echo.
-echo  [error]  Neither Python nor Node.js was found in PATH.
-echo           Install either one and re-run s.bat.
+echo  Both services are running in separate windows.
+echo  Close those windows (or Ctrl+C inside each) to stop.
 echo.
 pause
