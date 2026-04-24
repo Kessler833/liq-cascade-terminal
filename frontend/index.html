@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Liq Cascade Terminal</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <svg class="logo" viewBox="0 0 32 32" fill="none" aria-label="LCT">
+        <rect width="32" height="32" rx="6" fill="var(--color-primary)"/>
+        <path d="M8 24 L14 10 L20 18 L24 12" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="24" cy="12" r="2" fill="white"/>
+      </svg>
+      <span class="topbar-title">LiqCascade<span class="accent">Terminal</span></span>
+    </div>
+    <nav class="topbar-center">
+      <div id="symbolBtns" class="btn-group"></div>
+      <div id="tfBtns" class="btn-group"></div>
+    </nav>
+    <div class="topbar-right">
+      <span class="price-display" id="priceDisplay">—</span>
+      <span class="phase-badge" id="phaseBadge">WAITING</span>
+      <div class="conn-dots" id="connDots"></div>
+      <span class="ws-count" id="wsCount">0 WS</span>
+    </div>
+  </header>
+
+  <!-- Main grid -->
+  <main class="grid-layout">
+    <!-- Left: stats -->
+    <aside class="panel stats-panel">
+      <div class="stat-block">
+        <div class="stat-label">Total Liquidated</div>
+        <div class="stat-value" id="statTotalLiq">$0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Longs Liq'd</div>
+        <div class="stat-value long" id="statLongsLiq">$0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Shorts Liq'd</div>
+        <div class="stat-value short" id="statShortsLiq">$0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">1m Rate</div>
+        <div class="stat-value" id="statRate">$0/m</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Cum. Delta</div>
+        <div class="stat-value" id="statDelta">0</div>
+      </div>
+      <div class="stat-block">
+        <div class="stat-label">Cascades</div>
+        <div class="stat-value" id="statCascades">0</div>
+      </div>
+      <!-- Cascade meter -->
+      <div class="meter-wrap">
+        <div class="meter-label">Cascade Meter</div>
+        <div class="meter-track">
+          <div class="meter-bar" id="cascadeMeter"></div>
+        </div>
+        <div class="meter-pct" id="cascadePct">0%</div>
+      </div>
+      <!-- Exchange breakdown -->
+      <div class="exchange-list" id="exchangeList"></div>
+    </aside>
+
+    <!-- Center: charts -->
+    <section class="panel chart-panel">
+      <div class="chart-tabs">
+        <button class="tab-btn active" data-tab="price">Price</button>
+        <button class="tab-btn" data-tab="liq">Liquidations</button>
+        <button class="tab-btn" data-tab="delta">Delta</button>
+        <button class="tab-btn" data-tab="impact">Impact</button>
+      </div>
+      <div class="chart-wrap" id="chartWrap">
+        <div id="priceChart"  class="chart-container active"></div>
+        <div id="liqChart"    class="chart-container"></div>
+        <div id="deltaChart"  class="chart-container"></div>
+        <div id="impactChart" class="chart-container"></div>
+      </div>
+    </section>
+
+    <!-- Right: feed + log -->
+    <aside class="panel right-panel">
+      <div class="feed-header">
+        <span class="feed-title">Liq Feed</span>
+        <span class="feed-count" id="feedCount">0</span>
+      </div>
+      <div class="feed-list" id="feedList"></div>
+      <div class="log-header">Signal Log</div>
+      <div class="log-list" id="logList"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
