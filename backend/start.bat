@@ -9,5 +9,8 @@ if not exist ".venv" (
 call .venv\Scripts\activate.bat
 pip install -q -r requirements.txt
 
-echo [liqterm] Starting backend on http://localhost:8000
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+set PORT=%1
+if "%PORT%"=="" set PORT=8000
+
+echo [liqterm] Starting backend on http://localhost:%PORT%
+uvicorn main:app --host 0.0.0.0 --port %PORT% --reload

@@ -36,22 +36,14 @@ echo.
 
 :: ── Backend window ──────────────────────────────────────────────────────────
 echo  [1/2]  Starting backend...
-start "LiqTerm Backend" cmd /k ^
-  "cd /d "%~dp0backend" ^&^& ^
-   if not exist .venv python -m venv .venv ^&^& ^
-   call .venv\Scripts\activate.bat ^&^& ^
-   pip install -q -r requirements.txt ^&^& ^
-   uvicorn main:app --host 0.0.0.0 --port %BACKEND_PORT% --reload"
+start "LiqTerm Backend" cmd /k "call ""%~dp0backend\start.bat"" %BACKEND_PORT%"
 
 :: Give backend 3 seconds to boot before frontend starts
 timeout /t 3 /nobreak >nul
 
 :: ── Frontend window ─────────────────────────────────────────────────────────
 echo  [2/2]  Starting frontend...
-start "LiqTerm Frontend" cmd /k ^
-  "cd /d "%~dp0frontend" ^&^& ^
-   npm install --silent ^&^& ^
-   npx vite --host 0.0.0.0 --port %FRONTEND_PORT%"
+start "LiqTerm Frontend" cmd /k "call ""%~dp0frontend\start.bat"" %FRONTEND_PORT%"
 
 :: ── Open browser ────────────────────────────────────────────────────────────
 timeout /t 4 /nobreak >nul
