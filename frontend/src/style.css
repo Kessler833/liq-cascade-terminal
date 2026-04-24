@@ -2,7 +2,7 @@
 
 /* ================================================================
    LiqCascade Terminal — ORIGINAL DESIGN SYSTEM
-   Dark terminal palette · Cyan accent · Satoshi font
+   #090a0c bg · #00d4ff cyan · Satoshi 13px
    ================================================================ */
 
 :root {
@@ -30,6 +30,7 @@
   --transition:   150ms cubic-bezier(.16,1,.3,1);
 }
 
+/* ---- Reset ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
   height: 100%; overflow: hidden;
@@ -39,6 +40,8 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 body { display: flex; flex-direction: column; }
+
+/* ---- Topbar ---- */
 #topbar {
   display: flex; align-items: center; gap: 12px;
   padding: 0 16px; height: 48px; min-height: 48px;
@@ -51,164 +54,299 @@ body { display: flex; flex-direction: column; }
   color: var(--accent); text-transform: uppercase; flex-shrink: 0;
 }
 .divider { width: 1px; height: 24px; background: var(--border2); flex-shrink: 0; }
+
+/* ---- Buttons ---- */
 .btn-group { display: flex; gap: 4px; }
 .ctrl-btn {
-  padding: 5px 14px; border-radius: var(--radius); border: 1px solid var(--border2);
+  padding: 5px 14px; border-radius: var(--radius);
+  border: 1px solid var(--border2);
   background: transparent; color: var(--text-muted); cursor: pointer;
-  font-size: 12px; font-weight: 600; letter-spacing: 0.06em; font-family: var(--font);
-  transition: all var(--transition);
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  font-family: var(--font); transition: all var(--transition);
 }
 .ctrl-btn:hover { color: var(--text); border-color: var(--border); background: var(--surface2); }
 .ctrl-btn.active { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+
+/* ---- Topbar right ---- */
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
-.price-display { display: flex; align-items: baseline; gap: 6px; }
 .price-val {
   font-size: 18px; font-weight: 700;
   font-variant-numeric: tabular-nums; color: var(--text);
 }
+
+/* ---- Connection dots ---- */
 .conn-indicators { display: flex; gap: 6px; align-items: center; }
 .conn-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint);
-  transition: background 0.3s ease;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-faint); transition: background 0.3s ease;
 }
 .conn-dot.connected  { background: var(--green); box-shadow: 0 0 6px var(--green2); }
 .conn-dot.connecting { background: var(--orange); animation: pulse 1.2s ease-in-out infinite; }
 .conn-dot.error      { background: var(--red); }
-.ws-count   { font-size: 11px; color: var(--text-muted); }
+.ws-count { font-size: 11px; color: var(--text-muted); }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* ---- Phase badge ---- */
 .phase-badge {
-  padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border2);
-  background: var(--surface3); font-size: 11px; font-weight: 600;
-  letter-spacing: 0.06em; color: var(--text-muted);
-  transition: all var(--transition);
+  padding: 3px 10px; border-radius: 4px;
+  border: 1px solid var(--border2); background: var(--surface3);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--text-muted); transition: all var(--transition);
 }
 .phase-badge.phase-cascade  { color: var(--orange); border-color: var(--orange); background: rgba(255,157,0,.12); }
 .phase-badge.phase-watching { color: var(--yellow); border-color: var(--yellow); background: rgba(244,208,63,.12); }
 .phase-badge.phase-long     { color: var(--green);  border-color: var(--green);  background: rgba(0,230,118,.12); }
 .phase-badge.phase-short    { color: var(--red);    border-color: var(--red);    background: rgba(255,61,90,.12); }
+
+/* ---- Strategy bar ---- */
 #strategy-bar {
   display: flex; align-items: center; gap: 16px;
   padding: 0 16px; height: 36px; min-height: 36px;
   background: var(--surface2); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.strat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint); }
+.strat-label {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text-faint);
+}
 .cascade-meter { display: flex; align-items: center; gap: 8px; }
 .signal-list { display: flex; gap: 8px; margin-left: auto; }
 .signal {
-  padding: 2px 10px; border-radius: 3px; font-size: 10px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.3;
-  transition: opacity 0.3s ease;
+  padding: 2px 10px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; opacity: 0.3; transition: opacity 0.3s ease;
 }
 .signal.active { opacity: 1; }
-.signal.long     { background: rgba(0,230,118,.15); color: var(--green);  border: 1px solid rgba(0,230,118,.3); }
-.signal.short    { background: rgba(255,61,90,.15);  color: var(--red);    border: 1px solid rgba(255,61,90,.3); }
-.signal.cascade  { background: rgba(255,157,0,.15);  color: var(--orange); border: 1px solid rgba(255,157,0,.3); }
+.signal.long    { background: rgba(0,230,118,.15); color: var(--green);  border: 1px solid rgba(0,230,118,.3); }
+.signal.short   { background: rgba(255,61,90,.15);  color: var(--red);    border: 1px solid rgba(255,61,90,.3); }
+.signal.cascade { background: rgba(255,157,0,.15);  color: var(--orange); border: 1px solid rgba(255,157,0,.3); }
+
+/* ---- Main layout ---- */
 #terminal-screen { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 #main { flex: 1; display: grid; grid-template-columns: 1fr 320px; overflow: hidden; min-height: 0; }
+
+/* ---- Charts area ---- */
 #charts-area {
-  display: flex; flex-direction: column; overflow: hidden;
-  min-height: 0; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden; min-height: 0;
+  border-right: 1px solid var(--border);
 }
+
+/* ---- Chart tabs (tab-btn used by ui.ts) ---- */
 .chart-tabs {
   display: flex; gap: 2px; padding: 6px 12px;
   border-bottom: 1px solid var(--border); flex-shrink: 0;
   background: var(--surface);
 }
 .tab-btn {
-  padding: 4px 12px; border-radius: 4px; border: 1px solid transparent;
-  background: transparent; color: var(--text-faint); cursor: pointer;
+  padding: 4px 12px; border-radius: 4px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-faint); cursor: pointer;
   font-size: 11px; font-weight: 600; font-family: var(--font);
   transition: all var(--transition);
 }
 .tab-btn:hover  { color: var(--text-muted); background: var(--surface2); }
 .tab-btn.active { color: var(--accent); background: var(--surface3); border-color: var(--accent2); }
-.chart-slot { position: relative; min-height: 0; }
-#priceChart { flex: 1; min-height: 0; }
-#liqChart { height: 180px; min-height: 180px; max-height: 180px; flex-shrink: 0; }
-#deltaChart { height: 140px; min-height: 140px; max-height: 140px; flex-shrink: 0; }
-#impactChart { width: 100%; height: 100%; min-height: 0; }
+
+/* ---- Chart containers (lightweight-charts mounts into these divs) ---- */
+.chart-slot { position: relative; }
+#priceChart {
+  flex: 1; min-height: 0;
+  background: var(--bg);
+}
+#liqChart {
+  height: 180px; min-height: 180px; max-height: 180px; flex-shrink: 0;
+  background: var(--bg);
+}
+#deltaChart {
+  height: 140px; min-height: 140px; max-height: 140px; flex-shrink: 0;
+  background: var(--bg);
+}
+#impactChart {
+  flex: 1; min-height: 0;
+  background: var(--bg);
+}
+
+#chart-divider1, #chart-divider2 {
+  height: 1px; min-height: 1px;
+  background: var(--border); flex-shrink: 0;
+}
+
 .chart-label {
   position: absolute; top: 10px; left: 14px;
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
   color: var(--text-faint); pointer-events: none; z-index: 5;
 }
-#chart-divider1, #chart-divider2 { height: 1px; min-height: 1px; background: var(--border); flex-shrink: 0; }
-#right-panel { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+
+/* ---- Right panel ---- */
+#right-panel {
+  display: flex; flex-direction: column;
+  overflow: hidden; min-height: 0;
+  background: var(--surface);
+}
 .panel-section { flex-shrink: 0; border-bottom: 1px solid var(--border); }
 .panel-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 14px; background: var(--surface2);
 }
-.panel-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint); font-weight: 600; }
+.panel-title {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text-faint); font-weight: 600;
+}
 .panel-badge {
   font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
-  background: var(--surface3); color: var(--text-faint); font-variant-numeric: tabular-nums;
+  background: var(--surface3); color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
+
+/* ---- Stats grid ---- */
 #stats-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px;
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 8px; padding: 10px 12px;
+  background: var(--surface);
 }
 .stat-card {
-  background: var(--surface2); border-radius: 5px; padding: 8px 10px;
-  border: 1px solid var(--border);
+  background: var(--surface2); border-radius: 5px;
+  padding: 8px 10px; border: 1px solid var(--border);
 }
-.stat-card-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); margin-bottom: 3px; }
-.stat-card-val   { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-card-label {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-faint); margin-bottom: 3px;
+}
+.stat-card-val {
+  font-size: 16px; font-weight: 700;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
 .stat-card-val.green  { color: var(--green); }
 .stat-card-val.red    { color: var(--red); }
 .stat-card-val.orange { color: var(--orange); }
 .stat-card-val.accent { color: var(--accent); }
+
+/* ---- Exchange list (updateExchangeList writes .ex-row children) ---- */
+#exchangeList {
+  padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.ex-row {
+  display: grid; grid-template-columns: 3fr 2fr 2fr;
+  gap: 4px; font-size: 10px;
+  padding: 3px 4px; border-radius: 3px;
+}
+.ex-row:hover { background: var(--surface2); }
+.ex-name  { color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.04em; }
+.ex-long  { color: var(--green); text-align: right; font-variant-numeric: tabular-nums; }
+.ex-short { color: var(--red);   text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- Live feed ---- */
 .feed-header, .log-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 14px; background: var(--surface2);
   border-bottom: 1px solid var(--border); flex-shrink: 0;
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint);
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text-faint);
 }
 .log-header { border-top: 1px solid var(--border); }
 .feed-count {
   font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
-  background: var(--surface3); color: var(--text-faint); font-variant-numeric: tabular-nums;
-}
-.feed-item {
-  display: flex; align-items: center; gap: 8px; padding: 5px 14px;
-  border-bottom: 1px solid rgba(31,36,48,.5);
-  animation: feedIn 0.2s ease;
+  background: var(--surface3); color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
-@keyframes feedIn { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
+
+/* feed-item rows generated by ui.ts prependFeedItem */
+.feed-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px;
+  border-bottom: 1px solid rgba(31,36,48,.5);
+  font-variant-numeric: tabular-nums;
+  animation: feedIn 0.2s ease;
+}
+@keyframes feedIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
 .feed-item.long  { border-left: 2px solid var(--green2); }
 .feed-item.short { border-left: 2px solid var(--red2); }
-.fi-ex    { font-size: 9px; color: var(--text-faint); }
-.fi-side  { font-size: 10px; font-weight: 700; }
+
+/* fi-* classes from ui.ts innerHTML */
+.fi-ex    { font-size: 9px;  color: var(--text-faint); width: 28px; flex-shrink: 0; }
+.fi-side  { font-size: 10px; font-weight: 700; width: 28px; flex-shrink: 0; }
 .fi-side.long  { color: var(--green); }
 .fi-side.short { color: var(--red); }
-.fi-usd   { font-size: 11px; font-weight: 600; color: var(--text); }
+.fi-usd   { font-size: 11px; font-weight: 600; color: var(--text); flex: 1; }
 .fi-price { font-size: 10px; color: var(--text-muted); }
 .fi-sym   { font-size: 10px; color: var(--text-faint); }
 .fi-time  { font-size: 9px;  color: var(--text-faint); margin-left: auto; }
+
+/* size classes from sizeClass() util */
+.feed-item.sz-sm  { opacity: 0.6; }
+.feed-item.sz-md  { }
+.feed-item.sz-lg  { background: rgba(255,157,0,.04); }
+.feed-item.sz-xl  { background: rgba(255,61,90,.07); }
+
+/* ---- Signal log ---- */
 .log-item {
-  padding: 5px 14px; border-bottom: 1px solid rgba(31,36,48,.5);
   display: flex; gap: 8px; align-items: flex-start;
+  padding: 5px 14px;
+  border-bottom: 1px solid rgba(31,36,48,.5);
+  font-size: 10px;
 }
 .log-item.log-cascade { border-left: 2px solid var(--orange); }
 .log-item.log-long    { border-left: 2px solid var(--green); }
 .log-item.log-short   { border-left: 2px solid var(--red); }
 .log-item.log-exit    { border-left: 2px solid var(--purple); }
+.log-item.log-info    { border-left: 2px solid var(--accent2); }
+.log-tag {
+  font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+  text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0;
+}
+.log-tag.cascade { background: rgba(255,157,0,.15); color: var(--orange); }
+.log-tag.long    { background: rgba(0,230,118,.15);  color: var(--green); }
+.log-tag.short   { background: rgba(255,61,90,.15);  color: var(--red); }
+.log-tag.exit    { background: rgba(168,85,247,.15); color: var(--purple); }
+.log-tag.info    { background: rgba(0,212,255,.15);  color: var(--accent); }
+.log-time { font-size: 9px; color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.log-msg  { font-size: 10px; color: var(--text-muted); }
+
+/* ---- Status bar ---- */
 #statusbar {
   display: flex; align-items: center; gap: 16px;
   padding: 0 16px; height: 24px; min-height: 24px;
   background: var(--surface); border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
-.status-item { font-size: 10px; color: var(--text-faint); display: flex; gap: 4px; }
-.status-item span { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .status-dot {
-  width: 5px; height: 5px; border-radius: 50%; background: var(--green);
-  margin-right: 4px; align-self: center; box-shadow: 0 0 4px var(--green2);
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--green); align-self: center;
+  box-shadow: 0 0 4px var(--green2); flex-shrink: 0;
 }
-#impact-screen { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.status-item {
+  font-size: 10px; color: var(--text-faint);
+  display: flex; gap: 4px;
+}
+.status-item span { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ---- Impact screen ---- */
+#impact-screen {
+  flex: 1; display: flex; flex-direction: column;
+  min-height: 0; overflow: hidden;
+  background: var(--bg);
+}
 #impact-screen.hidden { display: none; }
-::-webkit-scrollbar { width: 3px; }
+
+/* ---- Meter bar (cascadeMeter filled div, written inline in HTML) ---- */
+.meter-bar {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--orange), var(--red));
+  border-radius: 3px; transition: width 0.3s ease;
+}
+.meter-bar.warn   { background: linear-gradient(90deg, var(--yellow), var(--orange)); }
+.meter-bar.danger { background: linear-gradient(90deg, var(--orange), var(--red)); }
+
+/* ---- Scrollbars ---- */
+::-webkit-scrollbar       { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* ---- Focus ---- */
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
