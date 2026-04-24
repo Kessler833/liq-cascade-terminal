@@ -1,37 +1,55 @@
-async function fetchTicker() {
-  try {
-    const r=await fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${SYMBOL_MAP[state.symbol].binance.toUpperCase()}`);
-    const d=await r.json();
-    document.getElementById('highDisplay').textContent=formatPrice(+d.highPrice);
-    document.getElementById('lowDisplay').textContent=formatPrice(+d.lowPrice);
-    document.getElementById('volDisplay').textContent=formatUSD(+d.quoteVolume);
-  } catch(e){}
-}
+document.addEventListener('DOMContentLoaded', () => {
+  // Symbol tabs
+  document.querySelectorAll('.sym-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sym = btn.dataset.sym;
+      if (sym === state.symbol) return;
+      document.querySelectorAll('.sym-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      Object.values(ws).forEach(w => { try { w.close(); } catch {} });
+      ws = {}; state.connectedWS = 0;
+      state.symbol = sym; state.phase = 'waiting'; state.cascadeScore = 0;
+      state.cumulativeDelta = 0; state.prevCumulativeDelta = 0;
+      state.candles = []; state.liqBars = []; state.deltaBars = [];
+      state.totalLiq=0;state.totalLiqEvents=0;state.longsLiqUsd=0;state.shortsLiqUsd=0;
+      state.longsLiqEvents=0;state.shortsLiqEvents=0;
+      for (const k of Object.keys(state.exchanges)) { state.exchanges[k]={long:0,short:0}; }
+      setStrategyPhase('waiting','Waiting for Cascade');
+      document.getElementById('sbSym').textContent = sym+'USDT';
+      connectAll();
+      updateCharts();
+    });
+  });
 
-async function fetchOI() {
-  try {
-    const r=await fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${SYMBOL_MAP[state.symbol].binance.toUpperCase()}`);
-    const d=await r.json();
-    document.getElementById('oiDisplay').textContent=formatUSD(parseFloat(d.openInterest)*state.price);
-  } catch(e){}
-}
+  // TF tabs
+  document.querySelectorAll('.tf-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tf === state.timeframe) return;
+      document.querySelectorAll('.tf-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.timeframe = btn.dataset.tf;
+      state.candles = []; state.liqBars = []; state.deltaBars = [];
+      document.getElementById('sbTf').textContent = state.timeframe;
+      Object.values(ws).forEach(w => { try { w.close(); } catch {} });
+      ws = {}; state.connectedWS = 0;
+      connectAll(); updateCharts();
+    });
+  });
 
-setInterval(updateCharts, 500);
-setInterval(()=>{
-  if(state.cascadeScore>0&&state.phase!=='cascade'){
-    state.cascadeScore=Math.max(0,state.cascadeScore*0.95);
-    const pct=Math.min(100,(state.cascadeScore/state.cascadeThreshold)*100);
-    document.getElementById('cascadeMeter').style.width=pct+'%';
-    document.getElementById('cascadeVal').textContent=pct.toFixed(0)+'%';
-    if(state.cascadeScore<100&&state.phase==='watching'){state.phase='waiting';setStrategyPhase('waiting','Waiting for Cascade');}
-  }
-},2000);
+  // Screen tabs (TERMINAL / IMPACT)
+  document.querySelectorAll('.screen-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.screen-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const screen = btn.dataset.screen;
+      document.getElementById('terminal-screen').classList.toggle('hidden', screen !== 'terminal');
+      document.getElementById('impact-screen').classList.toggle('hidden', screen !== 'impact');
+      if (screen === 'impact') { _updateImpactTable(); _updateImpactStats(); }
+    });
+  });
 
-fetchTicker(); fetchOI();
-setInterval(fetchTicker, 30000);
-setInterval(fetchOI, 60000);
-
-addLog('Terminal initialized. Connecting to exchanges...','info');
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
-connectAll();
+  fetchL2Snapshot();
+  connectAll();
+  updateCharts();
+  initImpactTab();
+});
