@@ -1,0 +1,30 @@
+server:
+  host: "0.0.0.0"
+  port: 8743
+  log_level: "info"
+
+app:
+  default_symbol: "BTC"
+  default_timeframe: "5m"
+  max_candles: 500
+  feed_max: 80
+  cascade_threshold: 5000000
+  silence_window_ms: 30000
+  min_liq_usd: 100000
+  l2_fetch_interval: 2.0
+  l2_depth: 40
+
+exchanges:
+  binance:
+    ws_url: "wss://fstream.binance.com/stream"
+    rest_url: "https://fapi.binance.com"
+  bybit:
+    ws_url: "wss://stream.bybit.com/v5/public/linear"
+  okx:
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+  bitget:
+    ws_url: "wss://ws.bitget.com/v2/ws/public"
+  gate:
+    ws_url: "wss://fx-ws.gateio.ws/v4/ws/usdt"
+  dydx:
+    ws_url: "wss://indexer.dydx.trade/v4/ws"
