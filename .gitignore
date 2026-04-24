@@ -8,23 +8,25 @@ venv/
 dist/
 build/
 .pytest_cache/
-*.log
 
-# Node / Vite
+# Node
 node_modules/
+dist/
+*.local
+
+# Vite
 frontend/dist/
-frontend/.vite/
-frontend/node_modules/
+
+# Env
+.env
+.env.*
+!.env.example
 
 # OS
 .DS_Store
 Thumbs.db
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
-
-# App data
-~/.liqterm/
-*.db
