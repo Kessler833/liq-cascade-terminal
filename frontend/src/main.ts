@@ -162,4 +162,4 @@ onMessage((msg: ServerMsg) => {
 connectWS();
 
 // ---- Resize observer ----
-new ResizeObserver(resizeAll).observe(document.querySelector('.chart-panel')!);
+new ResizeObserver(resizeAll).observe(document.querySelector('.chart-panel') ?? document.body);

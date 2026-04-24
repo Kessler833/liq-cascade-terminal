@@ -118,8 +118,8 @@ export function initLiqChart(container: HTMLElement) {
 
 export function updateLiqChart(bars: LiqBar[]) {
   if (!liqLongSeries || !liqShortSeries) return;
-  const longs:  HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: b.long_usd  }));
-  const shorts: HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: b.short_usd }));
+  const longs:  HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: b.long_usd   }));
+  const shorts: HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: -b.short_usd }));
   liqLongSeries.setData(longs);
   liqShortSeries.setData(shorts);
 }

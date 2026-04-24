@@ -214,6 +214,6 @@ async def set_timeframe(req: TimeframeRequest):
     # Re-fetch history with new TF (connections stay open)
     if conn_mgr:
         asyncio.create_task(
-            conn_mgr.strategy.apply_liq_store(app_state.symbol, tf)
+            conn_mgr._fetch_binance_history(app_state.symbol, tf)
         )
     return {"ok": True, "timeframe": tf}

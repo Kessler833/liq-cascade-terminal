@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 import httpx
@@ -95,7 +96,8 @@ class ConnectionManager:
         await self._hub.broadcast({"type": "conn_status", "exchange": name, "status": status})
 
     async def _on_connected(self, name: str):
-        self._s.connected_ws += 1
+        if self._dot_status.get(name) != "connected":
+            self._s.connected_ws += 1
         await self._set_dot(name, "connected")
         await self._hub.broadcast({"type": "ws_count", "count": self._s.connected_ws})
 
@@ -467,9 +469,9 @@ class ConnectionManager:
                             price    = float(t.get("price", 0))
                             vol      = size * price
                             notional = self._strategy.get_trade_notional("dydx", sym, size, price)
-                            ts_ms    = int(time.mktime(
-                                __import__("email.utils").utils.parsedate(t.get("createdAt", "")) or (0,)*9
-                            ) * 1000) if t.get("createdAt") else int(time.time() * 1000)
+                            ts_ms    = int(datetime.fromisoformat(
+                                t["createdAt"].replace("Z", "+00:00")
+                            ).timestamp() * 1000) if t.get("createdAt") else int(time.time() * 1000)
                             await self._strategy.update_delta(notional if is_buy else -notional, ts_ms)
                             # dYdX heuristic: large trade ≈ 8% liquidation
                             if vol > 50_000:

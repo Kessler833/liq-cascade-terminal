@@ -1,6 +1,6 @@
 /** DOM update functions — decoupled from chart rendering. */
 import { state, type FeedItem, type LogItem, type Stats } from './state';
-import { fmtUSD, fmtDelta, fmtPrice, fmtTime, fmtPct, el, sizeClass } from './utils';
+import { fmtUSD, fmtDelta, fmtPrice, fmtTime, el, sizeClass } from './utils';
 
 const EXCHANGES = ['binance','bybit','okx','bitget','gate','dydx'] as const;
 
