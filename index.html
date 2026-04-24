@@ -21,6 +21,12 @@
     LCT
   </div>
   <div class="divider"></div>
+  <!-- Screen tabs -->
+  <div class="screen-tabs">
+    <button class="screen-tab active" data-screen="terminal">TERMINAL</button>
+    <button class="screen-tab" data-screen="impact">IMPACT</button>
+  </div>
+  <div class="divider"></div>
   <div class="symbol-tabs">
     <button class="sym-tab active" data-sym="BTC">BTC</button>
     <button class="sym-tab" data-sym="ETH">ETH</button>
@@ -46,17 +52,20 @@
   </div>
   <div class="topbar-right">
     <div class="price-display">
-      <div class="price-val" id="priceDisplay">—</div>
-      <div class="price-change" id="priceChange">—</div>
+      <div class="price-val" id="priceDisplay">&mdash;</div>
+      <div class="price-change" id="priceChange">&mdash;</div>
     </div>
     <div class="stat-group">
-      <div class="stat"><div class="stat-label">24h Vol</div><div class="stat-val" id="volDisplay">—</div></div>
-      <div class="stat"><div class="stat-label">24h High</div><div class="stat-val" id="highDisplay">—</div></div>
-      <div class="stat"><div class="stat-label">24h Low</div><div class="stat-val" id="lowDisplay">—</div></div>
-      <div class="stat"><div class="stat-label">OI</div><div class="stat-val" id="oiDisplay">—</div></div>
+      <div class="stat"><div class="stat-label">24h Vol</div><div class="stat-val" id="volDisplay">&mdash;</div></div>
+      <div class="stat"><div class="stat-label">24h High</div><div class="stat-val" id="highDisplay">&mdash;</div></div>
+      <div class="stat"><div class="stat-label">24h Low</div><div class="stat-val" id="lowDisplay">&mdash;</div></div>
+      <div class="stat"><div class="stat-label">OI</div><div class="stat-val" id="oiDisplay">&mdash;</div></div>
     </div>
   </div>
 </div>
+
+<!-- ======================== TERMINAL SCREEN ======================== -->
+<div id="terminal-screen">
 
 <div id="strategy-bar">
   <div class="strat-label">Strategy Phase</div>
@@ -86,12 +95,12 @@
 <div id="main">
   <div id="charts-area">
     <div id="candle-container">
-      <div class="chart-label" id="candleLabel">BTCUSDT · 5m · MULTI-EXCHANGE</div>
+      <div class="chart-label" id="candleLabel">BTCUSDT &middot; 5m &middot; MULTI-EXCHANGE</div>
       <div class="crosshair-info" id="crosshairInfo">
-        <span class="ci-item"><span class="ci-label">O</span><span class="ci-o" id="ci-o">—</span></span>
-        <span class="ci-item"><span class="ci-label">H</span><span class="ci-h" id="ci-h">—</span></span>
-        <span class="ci-item"><span class="ci-label">L</span><span class="ci-l" id="ci-l">—</span></span>
-        <span class="ci-item"><span class="ci-label">C</span><span class="ci-c" id="ci-c">—</span></span>
+        <span class="ci-item"><span class="ci-label">O</span><span class="ci-o" id="ci-o">&mdash;</span></span>
+        <span class="ci-item"><span class="ci-label">H</span><span class="ci-h" id="ci-h">&mdash;</span></span>
+        <span class="ci-item"><span class="ci-label">L</span><span class="ci-l" id="ci-l">&mdash;</span></span>
+        <span class="ci-item"><span class="ci-label">C</span><span class="ci-c" id="ci-c">&mdash;</span></span>
       </div>
       <div id="crosshair-line-x"></div>
       <div id="crosshair-line-y"></div>
@@ -99,18 +108,18 @@
       <canvas id="candle-canvas"></canvas>
       <div class="chart-controls">
         <button class="ctrl-btn" id="zoomIn">+</button>
-        <button class="ctrl-btn" id="zoomOut">−</button>
+        <button class="ctrl-btn" id="zoomOut">&minus;</button>
         <button class="ctrl-btn" id="zoomReset" style="font-size:10px;width:32px;">RST</button>
       </div>
     </div>
     <div id="chart-divider1"></div>
     <div id="liq-container">
-      <div class="chart-label">LIQUIDATIONS (ALL EXCHANGES) · USD VALUE</div>
+      <div class="chart-label">LIQUIDATIONS (ALL EXCHANGES) &middot; USD VALUE</div>
       <canvas id="liq-canvas"></canvas>
     </div>
     <div id="chart-divider2"></div>
     <div id="delta-container">
-      <div class="chart-label">ORDERFLOW DELTA · BUY−SELL VOL PER CANDLE</div>
+      <div class="chart-label">ORDERFLOW DELTA &middot; BUY&minus;SELL VOL PER CANDLE</div>
       <canvas id="delta-canvas"></canvas>
     </div>
   </div>
@@ -150,6 +159,143 @@
   </div>
 </div>
 
+</div><!-- /terminal-screen -->
+
+<!-- ======================== IMPACT SCREEN ======================== -->
+<div id="impact-screen" class="hidden">
+
+  <!-- Stats bar -->
+  <div id="imp-statsbar">
+    <div class="imp-kpi">
+      <div class="imp-kpi-label">Observations</div>
+      <div class="imp-kpi-val accent" id="imp-kpi-total">0</div>
+    </div>
+    <div class="imp-kpi-sep"></div>
+    <div class="imp-kpi">
+      <div class="imp-kpi-label">Recording</div>
+      <div class="imp-kpi-val orange" id="imp-kpi-recording">0</div>
+    </div>
+    <div class="imp-kpi-sep"></div>
+    <div class="imp-kpi">
+      <div class="imp-kpi-label">Avg Model Error</div>
+      <div class="imp-kpi-val" id="imp-kpi-avg-err">&mdash;</div>
+    </div>
+    <div class="imp-kpi-sep"></div>
+    <div class="imp-kpi">
+      <div class="imp-kpi-label">Absorbed by Delta</div>
+      <div class="imp-kpi-val cyan" id="imp-kpi-absorbed">0</div>
+    </div>
+    <!-- Filters -->
+    <div class="imp-filters">
+      <select class="imp-select" id="imp-filter-asset">
+        <option value="All">All Assets</option>
+        <option value="BTC">BTC</option>
+        <option value="ETH">ETH</option>
+        <option value="SOL">SOL</option>
+      </select>
+      <select class="imp-select" id="imp-filter-side">
+        <option value="All">Both Sides</option>
+        <option value="Long">Long LIQ</option>
+        <option value="Short">Short LIQ</option>
+      </select>
+      <select class="imp-select" id="imp-filter-size">
+        <option value="All">Any Size</option>
+        <option value="Single">Single Event</option>
+        <option value="Multi">Multi Cascade</option>
+      </select>
+      <select class="imp-select" id="imp-filter-status">
+        <option value="All">All Status</option>
+        <option value="Recording">Recording</option>
+        <option value="Complete">Complete</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Body: table + detail panel -->
+  <div id="imp-body">
+
+    <!-- Observation table -->
+    <div id="imp-table-wrap">
+      <table id="imp-table">
+        <thead>
+          <tr class="imp-thead">
+            <th class="imp-th"></th>
+            <th class="imp-th">Time</th>
+            <th class="imp-th">Asset</th>
+            <th class="imp-th">Side</th>
+            <th class="imp-th">Cascade</th>
+            <th class="imp-th">Init LIQ</th>
+            <th class="imp-th">Total LIQ</th>
+            <th class="imp-th">&Delta; at Start</th>
+            <th class="imp-th">Initial Exp.</th>
+            <th class="imp-th">Final Exp.</th>
+            <th class="imp-th">Actual</th>
+            <th class="imp-th">Error %</th>
+            <th class="imp-th">Duration</th>
+            <th class="imp-th">Absorbed</th>
+          </tr>
+        </thead>
+        <tbody id="imp-tbody"></tbody>
+      </table>
+      <div id="imp-pagination">
+        <button class="imp-page-btn" id="imp-prev" disabled>&lsaquo; Prev</button>
+        <span id="imp-page-info" style="font-size:10px;color:var(--text-faint)">Page 1 / 1</span>
+        <button class="imp-page-btn" id="imp-next">Next &rsaquo;</button>
+      </div>
+    </div>
+
+    <!-- Detail panel -->
+    <div id="imp-detail">
+      <div id="imp-detail-header">
+        <div class="imp-det-title">
+          <span id="det-imp-asset" style="color:var(--accent);font-weight:700">BTC</span>
+          <span id="det-imp-side" style="font-weight:700">LONG</span>
+          <span style="color:var(--text-faint);font-size:10px">@ <span id="det-imp-entry">—</span></span>
+          <span style="color:var(--text-faint);font-size:10px">via <span id="det-imp-exch">—</span></span>
+        </div>
+        <div class="imp-det-meta">
+          <div class="imp-det-kv"><span class="imp-det-k">Cascade</span><span class="imp-det-v" id="det-imp-size">—</span></div>
+          <div class="imp-det-kv"><span class="imp-det-k">Duration</span><span class="imp-det-v" id="det-imp-dur">—</span></div>
+          <div class="imp-det-kv"><span class="imp-det-k">Error</span><span class="imp-det-v" id="det-imp-err">—</span></div>
+          <div class="imp-det-kv"><span class="imp-det-k">Absorbed</span><span class="imp-det-v" id="det-imp-abs">—</span></div>
+        </div>
+        <button class="imp-close-btn" id="imp-detail-close">&times;</button>
+      </div>
+      <div id="imp-charts-grid">
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">VOLUME DELTA OVER CASCADE</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-delta"></canvas></div>
+        </div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">PREDICTED TERMINAL PRICE</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-expected"></canvas></div>
+        </div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">ACTUAL PRICE MOVEMENT</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-price"></canvas></div>
+        </div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">LIQ VOLUME REMAINING (TANK)</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-tank"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /imp-body -->
+
+  <div id="imp-empty-state" style="display:none">
+    <div class="imp-empty-icon">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </div>
+    <div class="imp-empty-text">Waiting for cascade liquidation events&hellip;</div>
+    <div class="imp-empty-sub">Observations are recorded automatically when liquidations &ge; $100K arrive.</div>
+  </div>
+
+</div><!-- /impact-screen -->
+
 <div id="statusbar">
   <div class="status-dot"></div>
   <div class="status-item">Symbol: <span id="sbSym">BTCUSDT</span></div>
@@ -157,8 +303,11 @@
   <div class="status-item">Candles: <span id="sbCandles">0</span></div>
   <div class="status-item">Liq Events: <span id="sbLiqEvents">0</span></div>
   <div class="status-item">WebSockets: <span id="sbWS">0/6</span></div>
-  <div class="status-item" style="margin-left:auto;">Last Update: <span id="sbLastUpdate">—</span></div>
+  <div class="status-item" style="margin-left:auto;">Last Update: <span id="sbLastUpdate">&mdash;</span></div>
 </div>
+
+<!-- Chart.js (needed by Impact tab) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 
 <script src="js/state.js"></script>
 <script src="js/utils.js"></script>
@@ -166,6 +315,8 @@
 <script src="js/strategy.js"></script>
 <script src="js/websocket.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/l2_model.js"></script>
+<script src="js/cascade_impact.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
