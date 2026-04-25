@@ -13,8 +13,8 @@ import {
   updateCandleLabel, updateStatusBar,
 } from './ui';
 import {
-  initPriceChart, initLiqChart, initDeltaChart, initImpactChart,
-  updatePriceChart, updateLiqChart, updateDeltaChart, updateImpactChart,
+  initPriceChart, initLiqChart, initDeltaChart,
+  updatePriceChart, updateLiqChart, updateDeltaChart,
   updateLastCandle, resizeAll,
 } from './charts';
 
@@ -22,13 +22,12 @@ import {
 initPriceChart( document.getElementById('candle-container')!);
 initLiqChart(   document.getElementById('liq-container')!);
 initDeltaChart( document.getElementById('delta-container')!);
-initImpactChart(document.getElementById('impactChart')!);
 
 // ---- Init controls ----
 initConnDots();
 initControls(
-  async (sym)  => { await api.setSymbol(sym);    state.symbol    = sym; },
-  async (tf)   => { await api.setTimeframe(tf);  state.timeframe = tf; },
+  async (sym) => { await api.setSymbol(sym);    state.symbol    = sym; },
+  async (tf)  => { await api.setTimeframe(tf);  state.timeframe = tf; },
   SYMBOLS, TIMEFRAMES,
 );
 
@@ -173,7 +172,6 @@ onMessage((msg: ServerMsg) => {
 
     case 'impact_update': {
       state.impact_obs = msg.observations;
-      updateImpactChart(msg.observations);
       break;
     }
   }

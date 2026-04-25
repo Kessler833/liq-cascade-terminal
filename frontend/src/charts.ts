@@ -10,7 +10,7 @@ import {
   type IChartApi, type ISeriesApi,
   type CandlestickData, type HistogramData, type LineData,
 } from 'lightweight-charts';
-import type { Candle, LiqBar, DeltaBar, ImpactObs } from './state';
+import type { Candle, LiqBar, DeltaBar } from './state';
 
 const DARK = {
   bg:        '#171614',
@@ -161,50 +161,11 @@ export function updateDeltaChart(bars: DeltaBar[]) {
   cumDeltaLine.setData(cum);
 }
 
-// ---- Impact chart (scatter via line markers) ----
-let impactChart:  IChartApi | null = null;
-let impactSeries: ISeriesApi<'Line'> | null = null;
-
-export function initImpactChart(container: HTMLElement) {
-  impactChart = createChart(container, {
-    ...baseOpts(container),
-    rightPriceScale: { borderColor: DARK.border, autoScale: true },
-  });
-  impactSeries = impactChart.addLineSeries({
-    color:     'transparent',
-    lineWidth: 1,
-    priceFormat: { type: 'percent' },
-  });
-  window.addEventListener('resize', () => {
-    impactChart?.applyOptions({ width: container.clientWidth, height: container.clientHeight });
-  });
-}
-
-export function updateImpactChart(obs: ImpactObs[]) {
-  if (!impactSeries) return;
-  const complete = obs.filter(o => o.label_filled === 1 && o.price_error_pct != null);
-  complete.sort((a, b) => a.timestamp - b.timestamp);
-  const points: LineData[] = complete.map(o => ({
-    time:  (o.timestamp / 1000) as any,
-    value: o.price_error_pct!,
-  }));
-  if (points.length) impactSeries.setData(points);
-  const markers = complete.map(o => ({
-    time:  (o.timestamp / 1000) as any,
-    position: o.price_error_pct! >= 0 ? 'aboveBar' : 'belowBar',
-    color: o.price_error_pct! >= 0 ? DARK.long : DARK.short,
-    shape: 'circle' as const,
-    text:  (o.price_error_pct! >= 0 ? '+' : '') + o.price_error_pct!.toFixed(2) + '%',
-  }));
-  (impactSeries as any).setMarkers(markers);
-}
-
 export function resizeAll() {
   for (const [chart, id] of [
-    [priceChart,  'candle-container'],
-    [liqChart,    'liq-container'],
-    [deltaChart,  'delta-container'],
-    [impactChart, 'impactChart'],
+    [priceChart, 'candle-container'],
+    [liqChart,   'liq-container'],
+    [deltaChart, 'delta-container'],
   ] as [IChartApi | null, string][]) {
     const el = document.getElementById(id);
     if (chart && el) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });

@@ -1,6 +1,6 @@
-/** DOM update functions — decoupled from chart rendering. */
+/** DOM update functions — uses original HTML element IDs and CSS classes. */
 import { state, type FeedItem, type LogItem, type Stats } from './state';
-import { fmtUSD, fmtDelta, fmtPrice, fmtTime, el, sizeClass } from './utils';
+import { fmtUSD, fmtDelta, fmtPrice, fmtTime, el } from './utils';
 
 const EXCHANGES = ['binance','bybit','okx','bitget','gate','dydx'] as const;
 
@@ -9,9 +9,12 @@ const EX_PREFIX: Record<string, string> = {
   bitget:  'bget', gate:  'gate', dydx: 'dydx',
 };
 
-const CHART_CONTAINERS = ['candle-container', 'liq-container', 'delta-container'];
+const CONN_LABEL: Record<string, string> = {
+  binance: 'BNCE', bybit: 'BYBT', okx: 'OKX',
+  bitget:  'BGET', gate:  'GATE', dydx: 'DYDX',
+};
 
-// ---- Symbol / TF buttons ----
+// ---- Symbol / TF / Screen buttons ----
 export function initControls(
   onSymbol: (s: string) => void,
   onTF:     (tf: string) => void,
@@ -20,23 +23,25 @@ export function initControls(
 ) {
   const symWrap = document.getElementById('symbolBtns')!;
   const tfWrap  = document.getElementById('tfBtns')!;
+
   for (const s of symbols) {
-    const b = el('button', 'ctrl-btn' + (s === state.symbol ? ' active' : ''), s);
+    const b = el('button', 'sym-tab' + (s === state.symbol ? ' active' : ''), s);
     b.addEventListener('click', () => { onSymbol(s); setActiveBtn(symWrap, b); });
     symWrap.appendChild(b);
   }
   for (const tf of timeframes) {
-    const b = el('button', 'ctrl-btn' + (tf === state.timeframe ? ' active' : ''), tf);
+    const b = el('button', 'tf-tab' + (tf === state.timeframe ? ' active' : ''), tf);
     b.addEventListener('click', () => { onTF(tf); setActiveBtn(tfWrap, b); });
     tfWrap.appendChild(b);
   }
-  // chart tab buttons
-  document.querySelectorAll('.tab-btn').forEach(btn => {
+
+  // Screen tab switching (TERMINAL / IMPACT)
+  document.querySelectorAll('.screen-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      const tab = (btn as HTMLElement).dataset.tab!;
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      const screen = (btn as HTMLElement).dataset.screen!;
+      document.querySelectorAll('.screen-tab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      if (tab === 'impact') {
+      if (screen === 'impact') {
         document.getElementById('terminal-screen')?.classList.add('hidden');
         document.getElementById('impact-screen')?.classList.remove('hidden');
       } else {
@@ -48,16 +53,17 @@ export function initControls(
 }
 
 function setActiveBtn(wrap: HTMLElement, btn: HTMLElement) {
-  wrap.querySelectorAll('.ctrl-btn').forEach(b => b.classList.remove('active'));
+  wrap.querySelectorAll('button').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
 }
 
-// ---- Price + Phase ----
+// ---- Price ----
 export function updatePrice(price: number) {
-  const el = document.getElementById('priceDisplay');
-  if (el) el.textContent = fmtPrice(price);
+  const e = document.getElementById('priceDisplay');
+  if (e) e.textContent = fmtPrice(price);
 }
 
+// ---- Phase ----
 const PHASE_LABELS: Record<string, string> = {
   waiting:  'Waiting for Cascade',
   watching: 'Watching for Delta Flip',
@@ -67,13 +73,6 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 export function updatePhase(phase: string) {
-  // Top-bar badge
-  const badge = document.getElementById('phaseBadge');
-  if (badge) {
-    badge.textContent = phase.toUpperCase();
-    badge.className = `phase-badge phase-${phase}`;
-  }
-  // Strategy bar
   const stratPhase = document.getElementById('stratPhase');
   if (stratPhase) stratPhase.dataset.phase = phase;
   const phaseText = document.getElementById('phaseText');
@@ -81,36 +80,35 @@ export function updatePhase(phase: string) {
     phaseText.textContent = PHASE_LABELS[phase] ?? phase;
     phaseText.dataset.phase = phase;
   }
-  // Signal badges
-  const sigCascade = document.getElementById('sigCascade');
-  const sigLong    = document.getElementById('sigLong');
-  const sigShort   = document.getElementById('sigShort');
-  if (sigCascade) sigCascade.classList.toggle('active', phase === 'cascade');
-  if (sigLong)    sigLong.classList.toggle('active',    phase === 'long');
-  if (sigShort)   sigShort.classList.toggle('active',   phase === 'short');
+  document.getElementById('sigCascade')?.classList.toggle('active', phase === 'cascade');
+  document.getElementById('sigLong')?.classList.toggle('active',    phase === 'long');
+  document.getElementById('sigShort')?.classList.toggle('active',   phase === 'short');
 }
 
 // ---- Stats panel ----
 export function updateStats(stats: Stats) {
-  setText('statTotalLiq',  fmtUSD(stats.total_liq));
-  setText('statLongsLiq',  fmtUSD(stats.longs_liq_usd));
-  setText('statShortsLiq', fmtUSD(stats.shorts_liq_usd));
-  setText('statRate',      fmtUSD(stats.liq_1m_bucket) + '/m');
-  const dEl = document.getElementById('statDelta');
+  setText('stat-total',    fmtUSD(stats.total_liq));
+  setText('stat-total-sub', stats.total_liq_events + ' events');
+  setText('stat-cascades', String(stats.cascade_count));
+  setText('stat-longs',    fmtUSD(stats.longs_liq_usd));
+  setText('stat-shorts',   fmtUSD(stats.shorts_liq_usd));
+  setText('liqRate1m',     fmtUSD(stats.liq_1m_bucket) + '/m');
+  // Delta display with color
+  const dEl = document.getElementById('deltaDisplay');
   if (dEl) {
     dEl.textContent = fmtDelta(stats.cumulative_delta);
-    dEl.className = 'stat-value ' + (stats.cumulative_delta >= 0 ? 'long' : 'short');
+    dEl.style.color = stats.cumulative_delta >= 0
+      ? 'var(--green)'
+      : 'var(--red)';
   }
-  setText('statCascades', String(stats.cascade_count));
   updateExchangeList(stats);
 }
 
 export function updateCascadeMeter(pct: number) {
   const bar = document.getElementById('cascadeMeter');
-  const lbl = document.getElementById('cascadePct');
+  const lbl = document.getElementById('cascadeVal');
   if (bar) bar.style.width = pct + '%';
   if (lbl) lbl.textContent = Math.round(pct) + '%';
-  if (bar) bar.className = 'meter-fill' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
 }
 
 function updateExchangeList(stats: Stats) {
@@ -131,15 +129,17 @@ function updateExchangeList(stats: Stats) {
   }
 }
 
-// ---- Connection dots ----
+// ---- Connection dots (label + dot pairs) ----
 export function initConnDots() {
   const wrap = document.getElementById('connDots');
   if (!wrap) return;
   wrap.innerHTML = '';
   for (const ex of EXCHANGES) {
-    const dot = el('span', 'conn-dot connecting', '');
-    dot.id = `dot-${ex}`;
+    const label = el('div', 'conn-label', CONN_LABEL[ex]);
+    const dot   = el('div', 'conn-dot connecting', '');
+    dot.id    = `dot-${ex}`;
     dot.title = ex;
+    wrap.appendChild(label);
     wrap.appendChild(dot);
   }
 }
@@ -147,8 +147,6 @@ export function initConnDots() {
 export function updateConnDot(exchange: string, status: string) {
   const dot = document.getElementById(`dot-${exchange}`);
   if (dot) dot.className = `conn-dot ${status}`;
-  const ct = document.getElementById('wsCount');
-  if (ct) ct.textContent = state.connected_ws + ' WS';
 }
 
 // ---- Candle label ----
@@ -162,29 +160,26 @@ export function updateStatusBar(opts: {
   symbol?: string; timeframe?: string; candles?: number;
   liqEvents?: number; wsCount?: number; lastUpdate?: boolean;
 }) {
-  if (opts.symbol    != null) setText('sbSym',      opts.symbol + 'USDT');
-  if (opts.timeframe != null) setText('sbTf',       opts.timeframe);
-  if (opts.candles   != null) setText('sbCandles',  String(opts.candles));
+  if (opts.symbol    != null) setText('sbSym',       opts.symbol + 'USDT');
+  if (opts.timeframe != null) setText('sbTf',        opts.timeframe);
+  if (opts.candles   != null) setText('sbCandles',   String(opts.candles));
   if (opts.liqEvents != null) setText('sbLiqEvents', String(opts.liqEvents));
-  if (opts.wsCount   != null) setText('sbWS',       opts.wsCount + '/6');
-  if (opts.lastUpdate) {
-    const now = new Date();
-    setText('sbLastUpdate', now.toLocaleTimeString());
-  }
+  if (opts.wsCount   != null) setText('sbWS',        opts.wsCount + '/6');
+  if (opts.lastUpdate) setText('sbLastUpdate', new Date().toLocaleTimeString());
 }
 
 // ---- Liq Feed ----
 export function prependFeedItem(item: FeedItem) {
-  const list = document.getElementById('feedList');
+  const list = document.getElementById('liq-feed');
   if (!list) return;
-  const row = el('div', `feed-item ${item.side} ${sizeClass(item.usd_val)}`);
+  const row = el('div', `feed-item ${item.side}`);
   row.innerHTML = `
-    <span class="fi-ex">${item.exchange.slice(0,3).toUpperCase()}</span>
-    <span class="fi-side ${item.side}">${item.side.toUpperCase()}</span>
-    <span class="fi-usd">${fmtUSD(item.usd_val)}</span>
-    <span class="fi-price">@ ${fmtPrice(item.price)}</span>
-    <span class="fi-sym">${item.symbol}</span>
-    <span class="fi-time">${fmtTime(item.ts)}</span>`;
+    <span class="feed-exch">${item.exchange.slice(0,4).toUpperCase()}</span>
+    <span class="feed-side">${item.side.toUpperCase()}</span>
+    <span class="feed-sym">${item.symbol}</span>
+    <span class="feed-size">${fmtUSD(item.usd_val)}</span>
+    <span class="feed-price">@ ${fmtPrice(item.price)}</span>
+    <span class="feed-time">${fmtTime(item.ts)}</span>`;
   list.insertBefore(row, list.firstChild);
   while (list.children.length > 80) list.removeChild(list.lastChild!);
   const ct = document.getElementById('feedCount');
@@ -192,7 +187,7 @@ export function prependFeedItem(item: FeedItem) {
 }
 
 export function renderFeed(items: FeedItem[]) {
-  const list = document.getElementById('feedList');
+  const list = document.getElementById('liq-feed');
   if (!list) return;
   list.innerHTML = '';
   for (const item of items) prependFeedItem(item);
@@ -200,16 +195,19 @@ export function renderFeed(items: FeedItem[]) {
 
 // ---- Signal Log ----
 export function prependLogItem(item: LogItem) {
-  const list = document.getElementById('logList');
+  const list = document.getElementById('signal-log');
   if (!list) return;
-  const row = el('div', `log-item log-${item.type}`);
-  row.innerHTML = `<span class="log-time">${fmtTime(item.ts)}</span><span class="log-msg">${item.msg}</span>`;
+  const row = el('div', 'log-entry');
+  row.innerHTML = `
+    <span class="log-time">${fmtTime(item.ts)}</span>
+    <span class="log-msg">${item.msg}</span>
+    <span class="log-tag ${item.type}">${item.type.toUpperCase()}</span>`;
   list.insertBefore(row, list.firstChild);
   while (list.children.length > 60) list.removeChild(list.lastChild!);
 }
 
 export function renderLog(items: LogItem[]) {
-  const list = document.getElementById('logList');
+  const list = document.getElementById('signal-log');
   if (!list) return;
   list.innerHTML = '';
   for (const item of [...items].reverse()) prependLogItem(item);

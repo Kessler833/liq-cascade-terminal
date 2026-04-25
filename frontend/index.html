@@ -9,7 +9,6 @@
 </head>
 <body>
 
-<!-- ======================== TOPBAR ======================== -->
 <div id="topbar">
   <div class="logo">
     <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-label="LCT">
@@ -23,24 +22,29 @@
   </div>
   <div class="divider"></div>
 
+  <!-- Screen tabs -->
+  <div class="screen-tabs">
+    <button class="screen-tab active" data-screen="terminal">TERMINAL</button>
+    <button class="screen-tab" data-screen="impact">IMPACT</button>
+  </div>
+  <div class="divider"></div>
+
   <!-- Symbol buttons — populated by initControls() -->
-  <div id="symbolBtns" class="btn-group"></div>
+  <div id="symbolBtns" class="symbol-tabs"></div>
   <div class="divider"></div>
 
   <!-- Timeframe buttons — populated by initControls() -->
-  <div id="tfBtns" class="btn-group"></div>
+  <div id="tfBtns" class="tf-tabs"></div>
   <div class="divider"></div>
 
-  <!-- Connection indicators -->
+  <!-- Connection indicators — populated by initConnDots() -->
   <div class="conn-indicators" id="connDots"></div>
-  <span class="ws-count" id="wsCount">0 WS</span>
 
-  <!-- Right side -->
   <div class="topbar-right">
     <div class="price-display">
       <div class="price-val" id="priceDisplay">&mdash;</div>
+      <div class="price-change" id="priceChange">&mdash;</div>
     </div>
-    <span class="phase-badge" id="phaseBadge">WAITING</span>
   </div>
 </div>
 
@@ -54,31 +58,28 @@
   <div class="divider"></div>
   <div class="strat-label">Cascade Strength</div>
   <div class="cascade-meter">
-    <div class="meter-bar">
-      <div class="meter-fill" id="cascadeMeter" style="width:0%"></div>
-    </div>
-    <span id="cascadePct" style="font-size:11px;font-variant-numeric:tabular-nums;color:var(--text-muted)">0%</span>
+    <div class="meter-bar"><div class="meter-fill" id="cascadeMeter" style="width:0%"></div></div>
+    <span id="cascadeVal" style="font-size:11px;font-variant-numeric:tabular-nums;color:var(--text-muted)">0%</span>
   </div>
+  <div class="divider"></div>
+  <div class="strat-label">1m Liq</div>
+  <div id="liqRate1m" style="font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-muted)">$0</div>
+  <div class="divider"></div>
+  <div class="strat-label">Delta</div>
+  <div id="deltaDisplay" style="font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-muted)">0.00</div>
   <div class="signal-list">
     <div class="signal cascade" id="sigCascade">CASCADE</div>
     <div class="signal long"    id="sigLong">LONG ENTRY</div>
-    <div class="signal short"   id="sigShort">SHORT ENTRY</div>
+    <div class="signal short"  id="sigShort">SHORT ENTRY</div>
   </div>
 </div>
 
 <!-- ======================== TERMINAL SCREEN ======================== -->
 <div id="terminal-screen">
-
   <div id="main">
 
-    <!-- Charts area -->
+    <!-- Charts area — all three always visible, stacked vertically -->
     <div id="charts-area">
-      <div class="chart-tabs">
-        <button class="tab-btn active" data-tab="price">Price</button>
-        <button class="tab-btn" data-tab="liq">Liquidations</button>
-        <button class="tab-btn" data-tab="delta">Delta</button>
-        <button class="tab-btn" data-tab="impact">Impact</button>
-      </div>
       <div id="candle-container">
         <div class="chart-label" id="candleLabel">BTCUSDT &middot; 5m &middot; MULTI-EXCHANGE</div>
         <div class="crosshair-info" id="crosshairInfo">
@@ -119,42 +120,12 @@
           <div class="panel-badge" id="totalLiqBadge">$0</div>
         </div>
         <div id="exchange-grid">
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#f0b90b">Binance</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bnce-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bnce-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="bnce-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bnce-bar-s" style="width:50%"></div></div>
-          </div>
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#f7931a">Bybit</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bybt-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bybt-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="bybt-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bybt-bar-s" style="width:50%"></div></div>
-          </div>
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#3b82f6">OKX</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="okx-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="okx-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="okx-bar-l" style="width:50%"></div><div class="exch-bar-short" id="okx-bar-s" style="width:50%"></div></div>
-          </div>
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#00e5ff">Bitget</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bget-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bget-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="bget-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bget-bar-s" style="width:50%"></div></div>
-          </div>
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#e879f9">Gate</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="gate-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="gate-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="gate-bar-l" style="width:50%"></div><div class="exch-bar-short" id="gate-bar-s" style="width:50%"></div></div>
-          </div>
-          <div class="exch-cell">
-            <div class="exch-row"><span class="exch-name" style="color:#a855f7">dYdX</span></div>
-            <div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="dydx-long">$0</span></div>
-            <div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="dydx-short">$0</span></div>
-            <div class="exch-bar-container"><div class="exch-bar-long" id="dydx-bar-l" style="width:50%"></div><div class="exch-bar-short" id="dydx-bar-s" style="width:50%"></div></div>
-          </div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#f0b90b">Binance</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bnce-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bnce-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="bnce-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bnce-bar-s" style="width:50%"></div></div></div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#f7931a">Bybit</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bybt-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bybt-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="bybt-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bybt-bar-s" style="width:50%"></div></div></div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#3b82f6">OKX</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="okx-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="okx-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="okx-bar-l" style="width:50%"></div><div class="exch-bar-short" id="okx-bar-s" style="width:50%"></div></div></div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#00e5ff">Bitget</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="bget-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="bget-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="bget-bar-l" style="width:50%"></div><div class="exch-bar-short" id="bget-bar-s" style="width:50%"></div></div></div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#e879f9">Gate</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="gate-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="gate-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="gate-bar-l" style="width:50%"></div><div class="exch-bar-short" id="gate-bar-s" style="width:50%"></div></div></div>
+          <div class="exch-cell"><div class="exch-row"><span class="exch-name" style="color:#a855f7">dYdX</span></div><div class="exch-row"><span class="exch-label">Long LIQ</span><span class="exch-longs" id="dydx-long">$0</span></div><div class="exch-row"><span class="exch-label">Short LIQ</span><span class="exch-shorts" id="dydx-short">$0</span></div><div class="exch-bar-container"><div class="exch-bar-long" id="dydx-bar-l" style="width:50%"></div><div class="exch-bar-short" id="dydx-bar-s" style="width:50%"></div></div></div>
         </div>
       </div>
 
@@ -162,28 +133,26 @@
       <div class="panel-section">
         <div class="panel-header"><div class="panel-title">Session Statistics</div></div>
         <div id="stats-grid">
-          <div class="stat-card"><div class="stat-card-label">Total Liq</div><div class="stat-card-val orange" id="statTotalLiq">$0</div></div>
-          <div class="stat-card"><div class="stat-card-label">Cascades</div><div class="stat-card-val accent" id="statCascades">0</div></div>
-          <div class="stat-card"><div class="stat-card-label">Long Liq'd</div><div class="stat-card-val green" id="statLongsLiq">$0</div></div>
-          <div class="stat-card"><div class="stat-card-label">Short Liq'd</div><div class="stat-card-val red" id="statShortsLiq">$0</div></div>
-          <div class="stat-card"><div class="stat-card-label">1m Rate</div><div class="stat-card-val" id="statRate">$0/m</div></div>
-          <div class="stat-card"><div class="stat-card-label">Cum. Delta</div><div class="stat-card-val" id="statDelta">0.00</div></div>
+          <div class="stat-card"><div class="stat-card-label">Total Liq (Session)</div><div class="stat-card-val orange" id="stat-total">$0</div><div class="stat-card-sub" id="stat-total-sub">0 events</div></div>
+          <div class="stat-card"><div class="stat-card-label">Cascades Detected</div><div class="stat-card-val accent" id="stat-cascades">0</div><div class="stat-card-sub">since session start</div></div>
+          <div class="stat-card"><div class="stat-card-label">Long Liquidated</div><div class="stat-card-val green" id="stat-longs">$0</div><div class="stat-card-sub" id="stat-longs-sub">0 events</div></div>
+          <div class="stat-card"><div class="stat-card-label">Short Liquidated</div><div class="stat-card-val red" id="stat-shorts">$0</div><div class="stat-card-sub" id="stat-shorts-sub">0 events</div></div>
         </div>
       </div>
 
       <!-- Live liq feed -->
-      <div class="panel-section" style="flex:0 0 auto;">
-        <div class="feed-header">
-          <span>Live Liquidation Feed</span>
-          <span class="feed-count" id="feedCount">0</span>
+      <div class="panel-section" style="flex:0 0 auto">
+        <div class="panel-header">
+          <div class="panel-title">Live Liquidation Feed</div>
+          <div class="panel-badge" id="feedCount">0</div>
         </div>
-        <div id="feedList" style="height:200px;overflow-y:auto;"></div>
+        <div id="liq-feed"></div>
       </div>
 
       <!-- Signal log -->
       <div class="panel-section" style="flex:1 1 auto;display:flex;flex-direction:column;min-height:0;overflow:hidden;">
-        <div class="log-header">Strategy Signal Log</div>
-        <div id="logList" style="flex:1;overflow-y:auto;"></div>
+        <div class="panel-header"><div class="panel-title">Strategy Signal Log</div></div>
+        <div id="signal-log"></div>
       </div>
 
     </div><!-- /right-panel -->
@@ -192,7 +161,6 @@
 
 <!-- ======================== IMPACT SCREEN ======================== -->
 <div id="impact-screen" class="hidden">
-  <div id="impactChart" style="height:180px;background:var(--bg);border-bottom:1px solid var(--border);"></div>
   <div id="imp-statsbar">
     <div class="imp-kpi"><div class="imp-kpi-label">Observations</div><div class="imp-kpi-val accent" id="imp-kpi-total">0</div></div>
     <div class="imp-kpi-sep"></div>
@@ -251,12 +219,12 @@
       </div>
     </div>
   </div>
-  <div id="imp-empty-state" style="display:none;position:relative;">
+  <div id="imp-empty-state" style="display:none">
     <div class="imp-empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
     <div class="imp-empty-text">Waiting for cascade liquidation events&hellip;</div>
     <div class="imp-empty-sub">Observations are recorded automatically when liquidations &ge; $100K arrive.</div>
   </div>
-</div>
+</div><!-- /impact-screen -->
 
 <!-- ======================== STATUS BAR ======================== -->
 <div id="statusbar">
