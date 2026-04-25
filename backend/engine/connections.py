@@ -58,7 +58,10 @@ class ConnectionManager:
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
         self._gen: int = 0
-        self._last_candle_open_t: int = 0   # last broadcast TF-bucket open time
+        # Per-symbol last-broadcast TF-bucket open time (key: canonical sym e.g. "BTC").
+        # Using a dict instead of a scalar so on_symbol_change can reset only
+        # the switching symbol without disturbing other symbols' agg state.
+        self._last_candle_open_t: dict[str, int] = {}
         self._agg: dict[str, dict] = {}     # "SYM:tf_bucket" -> live 1m aggregation state
 
     @property
@@ -89,18 +92,22 @@ class ConnectionManager:
         self._s.connected_ws = 0
         self._gen += 1
         self._agg.clear()
-        self._last_candle_open_t = 0
+        self._last_candle_open_t.clear()
         await self._connect_all()
 
     async def on_symbol_change(self, sym: str):
         """Symbol changed — no WS reconnect needed.
 
-        Reset aggregation state and re-fetch REST history at the new symbol.
+        Surgically resets only the switching symbol's agg state, then
+        re-fetches REST history. _fetch_binance_history rebuilds candles,
+        liq_bars (via apply_liq_store), and delta_bars (via apply_delta_store)
+        for the new symbol in one round-trip.
         All 6 exchange connections stay alive; they already subscribe to all
         symbols and route events via event_sym.
         """
-        self._last_candle_open_t = 0
-        self._agg.clear()
+        self._last_candle_open_t.pop(sym, None)
+        for key in [k for k in list(self._agg) if k.startswith(f"{sym}:")]:
+            del self._agg[key]
         await self._fetch_binance_history(sym, self._s.timeframe)
 
     async def on_timeframe_change(self, sym: str, tf: str):
@@ -110,8 +117,9 @@ class ConnectionManager:
         The permanent @kline_1m stream automatically starts filling the
         new TF buckets on the next 1m close.
         """
-        self._last_candle_open_t = 0
-        self._agg.clear()
+        self._last_candle_open_t.pop(sym, None)
+        for key in [k for k in list(self._agg) if k.startswith(f"{sym}:")]:
+            del self._agg[key]
         await self._fetch_binance_history(sym, tf)
 
     async def _connect_all(self):
@@ -185,8 +193,10 @@ class ConnectionManager:
     async def _run_binance(self, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("binance", "connecting")
-        self._last_candle_open_t = 0
+        self._last_candle_open_t.clear()
         self._agg.clear()
+        # Build O(1) reverse lookup once per connection attempt.
+        binance_to_sym = {m["binance"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -210,10 +220,7 @@ class ConnectionManager:
                         stream = msg["stream"]
                         data   = msg.get("data", {})
                         raw_sym = stream.split("@")[0]
-                        event_sym = next(
-                            (s for s, m in SYMBOL_MAP.items()
-                             if m["binance"] == raw_sym), None
-                        )
+                        event_sym = binance_to_sym.get(raw_sym)
                         if event_sym is None:
                             continue
                         if "forceOrder" in stream:
@@ -303,8 +310,9 @@ class ConnectionManager:
             for old in [b for b in list(self._agg) if b.startswith(f"{event_sym}:") and b <= cutoff]:
                 del self._agg[old]
         else:
-            if tf_bucket != self._last_candle_open_t:
-                self._last_candle_open_t = tf_bucket
+            last_t = self._last_candle_open_t.get(event_sym, 0)
+            if tf_bucket != last_t:
+                self._last_candle_open_t[event_sym] = tf_bucket
                 self._strategy.update_candle(c_tf, False)
                 await self._hub.broadcast({"type": "candle_open", **c_tf})
                 log.debug(f"New candle opened: t={tf_bucket} o={c_tf['o']}")
@@ -335,6 +343,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP
         await self._set_dot("bybit", "connecting")
         url = "wss://stream.bybit.com/v5/public/linear"
+        bybit_to_sym = {m["bybit"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -359,10 +368,7 @@ class ConnectionManager:
                             items = data if isinstance(data, list) else [data]
                             if topic.startswith("allLiquidation"):
                                 for d in items:
-                                    event_sym = next(
-                                        (s for s, m in SYMBOL_MAP.items()
-                                         if m["bybit"] == d.get("s")), None
-                                    )
+                                    event_sym = bybit_to_sym.get(d.get("s"))
                                     if not event_sym:
                                         continue
                                     side  = "short" if d.get("S") == "Buy" else "long"
@@ -375,11 +381,8 @@ class ConnectionManager:
                                         await self._impact.on_liquidation("bybit", side, usd, price)
                             elif topic.startswith("publicTrade"):
                                 for d in items:
-                                    event_sym = next(
-                                        (s for s, m in SYMBOL_MAP.items()
-                                         if m["bybit"] == d.get("s")), None
-                                    )
-                                    if not event_sym:
+                                    event_sym = bybit_to_sym.get(d.get("s"))
+                                    if not event_sym or event_sym != self._s.symbol:
                                         continue
                                     price    = float(d.get("p", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -418,6 +421,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP
         await self._set_dot("okx", "connecting")
         url = "wss://ws.okx.com:8443/ws/v5/public"
+        okx_to_sym = {m["okx"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -446,10 +450,7 @@ class ConnectionManager:
                             if ch == "liquidation-orders" and data:
                                 for d in data:
                                     inst_id = d.get("instId", "")
-                                    event_sym = next(
-                                        (s for s, m in SYMBOL_MAP.items()
-                                         if m["okx"] == inst_id), None
-                                    )
+                                    event_sym = okx_to_sym.get(inst_id)
                                     if not event_sym:
                                         continue
                                     for det in d.get("details", []):
@@ -467,11 +468,8 @@ class ConnectionManager:
                                                 await self._impact.on_liquidation("okx", side, usd, bk_px)
                             elif ch == "trades" and data:
                                 inst_id = arg.get("instId", "")
-                                event_sym = next(
-                                    (s for s, m in SYMBOL_MAP.items()
-                                     if m["okx"] == inst_id), None
-                                )
-                                if not event_sym:
+                                event_sym = okx_to_sym.get(inst_id)
+                                if not event_sym or event_sym != self._s.symbol:
                                     continue
                                 for d in data:
                                     price    = float(d.get("px", 0))
@@ -511,6 +509,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP
         await self._set_dot("bitget", "connecting")
         url = "wss://ws.bitget.com/v2/ws/public"
+        bitget_to_sym = {m["bitget"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -537,10 +536,7 @@ class ConnectionManager:
                                 continue
                             ch      = msg["arg"].get("channel", "")
                             inst_id = msg["arg"].get("instId", "")
-                            event_sym = next(
-                                (s for s, m in SYMBOL_MAP.items()
-                                 if m["bitget"] == inst_id), None
-                            )
+                            event_sym = bitget_to_sym.get(inst_id)
                             if not event_sym:
                                 continue
                             data  = msg.get("data", [])
@@ -561,6 +557,8 @@ class ConnectionManager:
                                         if event_sym == self._s.symbol:
                                             await self._impact.on_liquidation("bitget", side, usd, fp)
                             elif ch == "trade" and items:
+                                if event_sym != self._s.symbol:
+                                    continue
                                 for d in items:
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -599,6 +597,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP
         await self._set_dot("gate", "connecting")
         url = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+        gate_to_sym = {m["gate"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -629,10 +628,7 @@ class ConnectionManager:
                             if ch == "futures.liquidates" and items:
                                 for d in items:
                                     contract = d.get("contract", "")
-                                    event_sym = next(
-                                        (s for s, m in SYMBOL_MAP.items()
-                                         if m["gate"] == contract), None
-                                    )
+                                    event_sym = gate_to_sym.get(contract)
                                     if not event_sym:
                                         continue
                                     side = "short" if d.get("order_side") == "buy" else "long"
@@ -648,11 +644,8 @@ class ConnectionManager:
                             elif ch == "futures.trades" and items:
                                 for d in items:
                                     contract = d.get("contract", "")
-                                    event_sym = next(
-                                        (s for s, m in SYMBOL_MAP.items()
-                                         if m["gate"] == contract), None
-                                    )
-                                    if not event_sym:
+                                    event_sym = gate_to_sym.get(contract)
+                                    if not event_sym or event_sym != self._s.symbol:
                                         continue
                                     sz       = float(d.get("size", 0))
                                     price    = float(d.get("price", 0))
@@ -692,6 +685,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP
         await self._set_dot("dydx", "connecting")
         url = "wss://indexer.dydx.trade/v4/ws"
+        dydx_to_sym = {m["dydx"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
                 return
@@ -709,10 +703,7 @@ class ConnectionManager:
                         if not msg or "contents" not in msg:
                             continue
                         msg_id = msg.get("id", "")
-                        event_sym = next(
-                            (s for s, m in SYMBOL_MAP.items()
-                             if m["dydx"] == msg_id), None
-                        )
+                        event_sym = dydx_to_sym.get(msg_id)
                         if not event_sym:
                             continue
                         for t in msg["contents"].get("trades", []):
