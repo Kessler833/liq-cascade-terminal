@@ -367,28 +367,54 @@ body { display: flex; flex-direction: column; }
 .fi-sym   { font-size: 10px; color: var(--text-faint); }
 .fi-time  { font-size: 9px;  color: var(--text-faint); margin-left: auto; }
 
-/* Log items */
-#signal-log { flex: 1; overflow-y: auto; min-height: 0; }
-.log-list   { overflow-y: auto; flex: 1; }
-.log-entry, .log-item {
-  padding: 5px 14px; border-bottom: 1px solid rgba(31,36,48,.5);
-  display: flex; gap: 8px; align-items: flex-start;
+/* Terminal Log */
+#signal-log {
+  flex: 1; overflow-y: auto; min-height: 0;
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+  background: var(--bg);
 }
-.log-time { font-size: 9px;  color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
-.log-msg  { font-size: 10px; color: var(--text-muted); }
+.log-list { overflow-y: auto; flex: 1; }
+.log-entry, .log-item {
+  padding: 2px 8px; border-bottom: 1px solid rgba(31,36,48,.4);
+  display: flex; gap: 6px; align-items: baseline;
+}
+.log-entry:hover { background: var(--surface2); }
+.log-time {
+  font-size: 9px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums; flex-shrink: 0; line-height: 1.6;
+}
+.log-msg { font-size: 10px; color: var(--text-muted); flex: 1; line-height: 1.6; word-break: break-word; }
 .log-item.log-cascade { border-left: 2px solid var(--orange); }
 .log-item.log-long    { border-left: 2px solid var(--green); }
 .log-item.log-short   { border-left: 2px solid var(--red); }
 .log-item.log-exit    { border-left: 2px solid var(--purple); }
 .log-tag {
-  font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
-  text-transform: uppercase; letter-spacing: 0.05em;
+  font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 2px;
+  text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; line-height: 1.6;
 }
 .log-tag.cascade { background: rgba(255,157,0,.15); color: var(--orange); }
 .log-tag.long    { background: rgba(0,230,118,.15);  color: var(--green); }
 .log-tag.short   { background: rgba(255,61,90,.15);  color: var(--red); }
 .log-tag.exit    { background: rgba(168,85,247,.15); color: var(--purple); }
 .log-tag.info    { background: rgba(0,212,255,.15);  color: var(--accent); }
+.log-tag.conn    { background: rgba(0,212,255,.08);  color: #4f98a3; }
+.log-tag.error   { background: rgba(255,61,90,.15);  color: var(--red); }
+.log-tag.warn    { background: rgba(255,157,0,.15);  color: var(--orange); }
+.log-tag.sys     { background: rgba(61,68,85,.12);   color: var(--text-faint); }
+
+/* Log message colors by row type */
+.log-entry[data-type="cascade"] .log-msg { color: rgba(255,157,0,.8); }
+.log-entry[data-type="long"]    .log-msg { color: rgba(0,230,118,.8); }
+.log-entry[data-type="short"]   .log-msg { color: rgba(255,61,90,.8); }
+.log-entry[data-type="error"]   .log-msg { color: rgba(255,61,90,.7); }
+.log-entry[data-type="conn"]    .log-msg { color: var(--text-muted); }
+.log-entry[data-type="sys"]     .log-msg { color: var(--text-faint); }
+.log-entry[data-type="warn"]    .log-msg { color: rgba(255,157,0,.7); }
+
+/* Hide TradingView attribution watermark */
+#candle-container a,
+#liq-container a,
+#delta-container a { display: none !important; }
 
 /* Feed / log headers */
 .feed-header, .log-header {

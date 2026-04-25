@@ -15,13 +15,14 @@ import {
 import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLiqChart, updateDeltaChart,
-  updateLastCandle, resizeAll,
+  updateLastCandle, resizeAll, setupChartSync,
 } from './charts';
 
 // ---- Init charts ----
 initPriceChart( document.getElementById('candle-container')!);
 initLiqChart(   document.getElementById('liq-container')!);
 initDeltaChart( document.getElementById('delta-container')!);
+setupChartSync();
 
 // ---- Init controls ----
 initConnDots();
@@ -61,6 +62,7 @@ onMessage((msg: ServerMsg) => {
       updateDeltaChart(state.delta_bars);
       renderFeed(state.feed);
       renderLog(state.signal_log);
+      prependLogItem({ msg: `System ready · ${state.symbol} ${state.timeframe} · ${state.candles.length} candles`, type: 'sys', ts: Date.now() });
       updateCandleLabel(state.symbol, state.timeframe);
       updateStatusBar({
         symbol: state.symbol, timeframe: state.timeframe,
@@ -140,12 +142,21 @@ onMessage((msg: ServerMsg) => {
     case 'conn_status': {
       state.conn_status[msg.exchange] = msg.status;
       updateConnDot(msg.exchange, msg.status);
+      const connText = msg.status === 'connected' ? 'connected'
+                     : msg.status === 'error'     ? 'error — reconnecting in 3s'
+                     :                              'connecting...';
+      prependLogItem({
+        msg: `${msg.exchange.toUpperCase()}: ${connText}`,
+        type: msg.status === 'error' ? 'error' : msg.status === 'connected' ? 'conn' : 'warn',
+        ts: Date.now(),
+      });
       break;
     }
 
     case 'ws_count': {
       state.connected_ws = msg.count;
       updateStatusBar({ wsCount: msg.count });
+      prependLogItem({ msg: `WebSocket feeds: ${msg.count}/6 connected`, type: 'sys', ts: Date.now() });
       break;
     }
 
@@ -158,6 +169,7 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
     }

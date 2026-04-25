@@ -13,16 +13,16 @@ import {
 import type { Candle, LiqBar, DeltaBar } from './state';
 
 const DARK = {
-  bg:        '#171614',
-  surface:   '#1c1b19',
-  border:    '#393836',
-  text:      '#cdccca',
-  grid:      '#262523',
-  long:      '#6daa45',
-  short:     '#dd6974',
-  primary:   '#4f98a3',
-  orange:    '#fdab43',
-  gold:      '#e8af34',
+  bg:        '#090a0c',
+  surface:   '#0e1014',
+  border:    '#1f2430',
+  text:      '#e2e8f0',
+  grid:      '#13161b',
+  long:      '#00e676',
+  short:     '#ff3d5a',
+  primary:   '#00d4ff',
+  orange:    '#ff9d00',
+  gold:      '#00d4ff',
 };
 
 function baseOpts(container: HTMLElement) {
@@ -169,5 +169,21 @@ export function resizeAll() {
   ] as [IChartApi | null, string][]) {
     const el = document.getElementById(id);
     if (chart && el) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+  }
+}
+
+let _syncing = false;
+
+export function setupChartSync() {
+  const all = [priceChart, liqChart, deltaChart].filter(Boolean) as IChartApi[];
+  for (const source of all) {
+    source.timeScale().subscribeVisibleLogicalRangeChange(range => {
+      if (_syncing || !range) return;
+      _syncing = true;
+      for (const target of all) {
+        if (target !== source) target.timeScale().setVisibleLogicalRange(range);
+      }
+      _syncing = false;
+    });
   }
 }

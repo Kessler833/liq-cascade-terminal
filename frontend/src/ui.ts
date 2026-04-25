@@ -198,12 +198,13 @@ export function prependLogItem(item: LogItem) {
   const list = document.getElementById('signal-log');
   if (!list) return;
   const row = el('div', 'log-entry');
+  row.dataset.type = item.type;
   row.innerHTML = `
     <span class="log-time">${fmtTime(item.ts)}</span>
-    <span class="log-msg">${item.msg}</span>
-    <span class="log-tag ${item.type}">${item.type.toUpperCase()}</span>`;
+    <span class="log-tag ${item.type}">${item.type.toUpperCase()}</span>
+    <span class="log-msg">${item.msg}</span>`;
   list.insertBefore(row, list.firstChild);
-  while (list.children.length > 60) list.removeChild(list.lastChild!);
+  while (list.children.length > 200) list.removeChild(list.lastChild!);
 }
 
 export function renderLog(items: LogItem[]) {
