@@ -10,7 +10,12 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_CANDLES = 300
+# FIX: raised from 300 to 1500 to match the frontend trim limit in main.ts.
+# The previous mismatch caused permanent state divergence after ~5 h of
+# uptime: the frontend held up to 1500 candles while the backend silently
+# discarded everything beyond 300, making history reloads return a much
+# shorter series than the client already had rendered.
+MAX_CANDLES = 1500
 
 TF_MINUTES: dict[str, int] = {
     "1m":  1,

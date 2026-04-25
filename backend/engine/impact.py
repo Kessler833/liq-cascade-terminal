@@ -179,14 +179,36 @@ class ImpactRecorder:
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
+            # Extend existing cascade — no await, no suspension point.
             active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
         else:
+            # FIX: _tick_task singleton race.
+            #
+            # The original code called `await self._close_obs(sym)` first, then
+            # checked `self._tick_task is None or self._tick_task.done()` to
+            # decide whether to spawn the tick loop. Because `_close_obs` is a
+            # coroutine, it suspends at its own `await self._broadcast(...)` call.
+            # Two simultaneous liquidations could both reach the task-creation
+            # guard during that suspension window, both see _tick_task as None,
+            # and each spawn an independent _tick_loop — double-appending every
+            # series point for the life of the observation.
+            #
+            # Fix: ensure the task exists BEFORE any await.  We create it
+            # optimistically as soon as we know a new obs is needed.  The loop
+            # itself is safe to start early because it checks `self.active` on
+            # every iteration and exits immediately when it is empty.
+            if self._tick_task is None or self._tick_task.done():
+                self._tick_task = asyncio.create_task(self._tick_loop())
+
+            # Close previous obs if there was one (may suspend here — task
+            # is already created above so no second spawner can race us).
             if active:
                 await self._close_obs(sym)
+
             res = self._l2.compute_terminal_price(usd_val, self._s.cumulative_delta, side)
             obs = {
                 "id":                    _gen_id(),
@@ -215,8 +237,6 @@ class ImpactRecorder:
                 "label_filled":          0,
             }
             self.active[sym] = obs
-            if self._tick_task is None or self._tick_task.done():
-                self._tick_task = asyncio.create_task(self._tick_loop())
 
         await self._broadcast_table_update()
 
