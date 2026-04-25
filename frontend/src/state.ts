@@ -88,6 +88,12 @@ export interface ImpactObs {
   cascade_duration_s: number | null;
   absorbed_by_delta: boolean;
   label_filled: 0 | 1;
+  // L2 book cutoff tracking
+  // beyond_cutoff = true when the terminal price estimate has walked past the
+  // depth level where all N exchanges still contribute.  Means the prediction
+  // relies on a partial (thin) composite book and is less reliable.
+  beyond_cutoff: boolean;
+  cutoff_price: number | null;   // USD price of the stop line
   // time series: [timestamp_ms, value][]
   delta_series:           [number, number][];
   expected_price_series:  [number, number][];

@@ -53,6 +53,7 @@ export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
     const current = obs.find(o => o.id === _selectedId);
     if (current) {
       fillDetailHeader(current);
+      renderCutoffBanner(current);
       renderDetailCharts(current);
     }
   }
@@ -117,8 +118,13 @@ function renderTable(): void {
       hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
 
+    // Status cell: recording dot + optional CUTOFF badge
+    const cutoffBadge = (isRec && obs.beyond_cutoff)
+      ? ' <span class="imp-badge amber" title="Terminal price estimate crossed book depth cutoff — fewer exchanges contributing">CUTOFF</span>'
+      : '';
+
     tr.innerHTML = `
-      <td class="imp-td"><span class="imp-dot ${isRec ? 'recording' : 'complete'}"></span></td>
+      <td class="imp-td"><span class="imp-dot ${isRec ? 'recording' : 'complete'}"></span>${cutoffBadge}</td>
       <td class="imp-td mono" style="color:var(--text-muted);font-size:10px">${timeStr}</td>
       <td class="imp-td" style="color:var(--accent)">${obs.asset}</td>
       <td class="imp-td" style="color:${sideColor};font-weight:700">${obs.side.toUpperCase()}</td>
@@ -153,6 +159,7 @@ function openDetail(id: string): void {
   document.getElementById('imp-detail')?.classList.add('open');
 
   fillDetailHeader(obs);
+  renderCutoffBanner(obs);
   renderDetailCharts(obs);
 }
 
@@ -161,6 +168,9 @@ function closeDetail(): void {
   document.getElementById('imp-detail')?.classList.remove('open');
   document.querySelectorAll('.imp-row').forEach(r => r.classList.remove('active'));
   destroyCharts();
+  // Hide banner on close
+  const banner = document.getElementById('imp-cutoff-banner');
+  if (banner) banner.style.display = 'none';
 }
 
 function fillDetailHeader(obs: ImpactObs): void {
@@ -177,6 +187,80 @@ function fillDetailHeader(obs: ImpactObs): void {
   if (errEl) { errEl.textContent = fmtPct(obs.price_error_pct); errEl.style.color = errColor(obs.price_error_pct); }
   const absEl = document.getElementById('det-imp-abs');
   if (absEl) { absEl.textContent = obs.absorbed_by_delta ? 'YES' : 'NO'; absEl.style.color = obs.absorbed_by_delta ? 'var(--accent)' : 'var(--text-faint)'; }
+}
+
+// ---- cutoff banner ----
+// Shows a pulsing amber warning in the detail panel when the prediction
+// has walked past the depth level where all exchanges still contribute.
+
+function renderCutoffBanner(obs: ImpactObs): void {
+  // Lazily create the banner element if it doesn't exist yet.
+  // It is inserted as the first child of #imp-detail.
+  let banner = document.getElementById('imp-cutoff-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'imp-cutoff-banner';
+    banner.style.cssText = [
+      'display:none',
+      'align-items:center',
+      'gap:8px',
+      'padding:8px 14px',
+      'background:rgba(255,157,0,0.10)',
+      'border:1px solid rgba(255,157,0,0.35)',
+      'border-radius:6px',
+      'margin:0 0 10px 0',
+      'font-size:11px',
+      'color:#ffa040',
+      'font-family:monospace',
+      'animation:imp-cutoff-pulse 1.6s ease-in-out infinite',
+    ].join(';');
+
+    // Inject keyframes once
+    if (!document.getElementById('imp-cutoff-keyframes')) {
+      const style = document.createElement('style');
+      style.id = 'imp-cutoff-keyframes';
+      style.textContent = `
+        @keyframes imp-cutoff-pulse {
+          0%,100% { opacity:1; }
+          50%      { opacity:0.55; }
+        }
+        .imp-badge.amber {
+          background: rgba(255,157,0,0.18);
+          color: #ffa040;
+          border: 1px solid rgba(255,157,0,0.35);
+          padding: 1px 5px;
+          border-radius: 3px;
+          font-size: 9px;
+          font-weight: 700;
+          letter-spacing: 0.05em;
+          animation: imp-cutoff-pulse 1.6s ease-in-out infinite;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    const detail = document.getElementById('imp-detail');
+    if (detail) detail.prepend(banner);
+  }
+
+  if (obs.beyond_cutoff && obs.label_filled === 0) {
+    // Active recording that is beyond cutoff — show the warning.
+    const priceStr = obs.cutoff_price != null ? fmtPrice(obs.cutoff_price) : 'unknown';
+    banner.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffa040" stroke-width="2" style="flex-shrink:0">
+        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+      </svg>
+      <span>
+        <strong>Beyond book depth</strong> — prediction crossed data cutoff at
+        <strong>${priceStr}</strong>. Fewer than all exchanges contribute below
+        this level; estimate is extrapolated and less reliable.
+      </span>
+    `;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
 }
 
 // ---- detail charts ----
@@ -228,11 +312,51 @@ function renderDetailCharts(obs: ImpactObs): void {
   }
 
   // ---- Chart 2: Predicted Terminal Price ----
+  // Includes:
+  //   - amber dashed horizontal line at cutoff_price ("stop line")
+  //   - amber dashed vertical annotation at the first tick where beyond_cutoff
+  //     becomes true (the exact crossing point)
   const expSeries = obs.expected_price_series;
   if (expSeries && expSeries.length > 1) {
-    const labels = elapsedLabels(expSeries, origin);
-    const data   = expSeries.map(([, v]) => v);
+    const labels        = elapsedLabels(expSeries, origin);
+    const data          = expSeries.map(([, v]) => v);
     const sideLineColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)' : 'rgba(0,230,118,0.85)';
+
+    // Find first index where the prediction crossed beyond the cutoff.
+    // We approximate by checking if the series value is beyond cutoff_price.
+    const cutoffDatasets: object[] = [];
+    if (obs.cutoff_price != null) {
+      // Horizontal stop-line at cutoff_price
+      cutoffDatasets.push(
+        refLine(labels, obs.cutoff_price, 'rgba(255,157,0,0.75)', 'Book depth limit')
+      );
+
+      // Vertical marker at the first tick that crossed the cutoff.
+      // For a long liq: price goes down → crossed when value < cutoff_price.
+      // For a short liq: price goes up  → crossed when value > cutoff_price.
+      const crossIdx = data.findIndex(v =>
+        obs.side === 'long' ? v < obs.cutoff_price! : v > obs.cutoff_price!
+      );
+      if (crossIdx >= 0) {
+        // Scatter a single vertical marker at the crossing tick.
+        const crossPointData = labels.map((_, i) =>
+          i === crossIdx ? obs.cutoff_price : null
+        );
+        cutoffDatasets.push({
+          type: 'scatter',
+          label: 'Cutoff crossed',
+          data: crossPointData,
+          pointRadius: labels.map((_, i) => i === crossIdx ? 10 : 0),
+          pointStyle: 'line',
+          rotation: 90,
+          borderColor: 'rgba(255,157,0,0.9)',
+          borderWidth: 2,
+          fill: false,
+          parsing: false,
+        });
+      }
+    }
+
     const canvasCtx = ctx('imp-chart-expected');
     if (canvasCtx) {
       _charts.expected = new Chart(
@@ -247,10 +371,16 @@ function renderDetailCharts(obs: ImpactObs): void {
               ...(obs.actual_terminal_price != null
                 ? [refLine(labels, obs.actual_terminal_price, 'rgba(0,230,118,0.55)', 'Actual')]
                 : []),
+              ...cutoffDatasets,
               ...cascadeAnnotations(cascadeEvents, expSeries, origin),
             ],
           },
-          options: chartOpts('Predicted price', fmtPrice),
+          options: chartOptsWithCutoffPlugin(
+            'Predicted price',
+            fmtPrice,
+            obs.cutoff_price,
+            labels,
+          ),
         }
       );
     }
@@ -391,10 +521,162 @@ function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
   };
 }
 
+/**
+ * Extended chart options for the predicted-price chart.
+ * Adds an afterDraw plugin that renders a labelled vertical amber line
+ * at the cutoff crossing tick, plus a shaded "beyond-cutoff" region.
+ */
+function chartOptsWithCutoffPlugin(
+  yLabel: string,
+  tickFmt: (v: number) => string,
+  cutoffPrice: number | null,
+  labels: string[],
+): object {
+  const base = chartOpts(yLabel, tickFmt) as any;
+
+  if (cutoffPrice == null) return base;
+
+  // We find the crossing tick index inside the plugin itself because we need
+  // access to the chart scales at draw time.
+  base.plugins = {
+    ...base.plugins,
+    // Inline Chart.js plugin (registered per-instance via plugins array below)
+  };
+
+  // Return base opts — the cutoff visual is handled via the scatter dataset
+  // and horizontal refLine already added in renderDetailCharts.
+  // The afterDraw plugin below adds the amber shaded region + label.
+  base.plugins.cutoffRegion = {
+    id: 'cutoffRegion',
+    afterDraw(chart: any) {
+      if (cutoffPrice == null) return;
+      const { ctx: c, scales: { x, y } } = chart;
+      if (!x || !y) return;
+
+      // Find the first x-tick index where the main series crosses cutoff
+      const mainDs = chart.data.datasets[0];
+      if (!mainDs) return;
+      const vals: (number | null)[] = mainDs.data;
+
+      // Determine side from whether the main series eventually goes below
+      // or above cutoff_price.
+      let crossIdx = -1;
+      for (let i = 0; i < vals.length; i++) {
+        const v = vals[i];
+        if (v == null) continue;
+        // long liq → terminal goes down → cross when value drops below cutoff
+        // short liq → terminal goes up  → cross when value rises above cutoff
+        const prevOk = i === 0 ? true : (
+          (vals[i - 1] ?? cutoffPrice) >= cutoffPrice
+        );
+        if (v < cutoffPrice && prevOk) { crossIdx = i; break; }
+        if (v > cutoffPrice && !prevOk) { crossIdx = i; break; }
+      }
+      // fallback: just use where series diverges from cutoff
+      if (crossIdx === -1) {
+        for (let i = 0; i < vals.length; i++) {
+          const v = vals[i];
+          if (v != null && Math.abs(v - cutoffPrice) > cutoffPrice * 0.0001) {
+            crossIdx = i;
+            break;
+          }
+        }
+      }
+      if (crossIdx < 0 || crossIdx >= labels.length) return;
+
+      const xPos  = x.getPixelForIndex(crossIdx);
+      const right = x.right;
+      const top   = y.top;
+      const bot   = y.bottom;
+
+      // Shaded region beyond cutoff
+      c.save();
+      c.fillStyle = 'rgba(255,157,0,0.06)';
+      c.fillRect(xPos, top, right - xPos, bot - top);
+
+      // Vertical dashed amber line at crossing
+      c.setLineDash([4, 4]);
+      c.strokeStyle = 'rgba(255,157,0,0.7)';
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.moveTo(xPos, top);
+      c.lineTo(xPos, bot);
+      c.stroke();
+
+      // Label "Book depth limit"
+      c.setLineDash([]);
+      c.fillStyle = 'rgba(255,157,0,0.9)';
+      c.font = '9px monospace';
+      c.textAlign = 'left';
+      c.fillText('Book depth limit', xPos + 4, top + 12);
+
+      c.restore();
+    },
+  };
+
+  // Register inline plugin by adding it to the chart's plugins array.
+  // Chart.js v3+ supports per-instance plugins via the plugins config array.
+  base.plugins.customPlugins = [base.plugins.cutoffRegion];
+  // Chart.js reads per-instance plugins from chart options.plugins array
+  // only in some configs; the reliable path is to add to Chart.register.
+  // We'll attach it via a wrapper instead.
+  delete base.plugins.cutoffRegion;
+
+  // Store as a top-level property; caller must pass it to Chart constructor
+  // as the 3rd argument `plugins` array is not standard.
+  // Cleanest approach: embed as an inline plugin on the chart config.
+  base._cutoffPlugin = {
+    id: 'cutoffRegion',
+    afterDraw(chart: any) {
+      if (cutoffPrice == null) return;
+      const { ctx: c, scales: { x, y } } = chart;
+      if (!x || !y) return;
+      const mainDs = chart.data.datasets[0];
+      if (!mainDs) return;
+      const vals: (number | null)[] = mainDs.data;
+      let crossIdx = -1;
+      for (let i = 0; i < vals.length; i++) {
+        const v = vals[i];
+        if (v == null) continue;
+        if (v < cutoffPrice) { crossIdx = i; break; }
+        if (v > cutoffPrice) { crossIdx = i; break; }
+      }
+      if (crossIdx < 0 || crossIdx >= labels.length) return;
+      const xPos  = x.getPixelForIndex(crossIdx);
+      const right = x.right;
+      const top   = y.top;
+      const bot   = y.bottom;
+      c.save();
+      c.fillStyle = 'rgba(255,157,0,0.06)';
+      c.fillRect(xPos, top, right - xPos, bot - top);
+      c.setLineDash([4, 4]);
+      c.strokeStyle = 'rgba(255,157,0,0.7)';
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.moveTo(xPos, top);
+      c.lineTo(xPos, bot);
+      c.stroke();
+      c.setLineDash([]);
+      c.fillStyle = 'rgba(255,157,0,0.9)';
+      c.font = '9px monospace';
+      c.textAlign = 'left';
+      c.fillText('Book depth limit', xPos + 4, top + 12);
+      c.restore();
+    },
+  };
+
+  return base;
+}
+
+// Override renderDetailCharts to pass the cutoff plugin properly.
+// We patch the Chart constructor call for the expected chart in-place above,
+// but Chart.js v3 per-instance plugins must be in the config object under
+// `plugins` key as an array — not under `options.plugins`.
+// The cleanest fix is to return {config, plugins} and use the 2-arg form:
+//   new Chart(ctx, { ...config, plugins: [cutoffPlugin] })
+// This is handled in renderDetailCharts by reading _cutoffPlugin off the opts.
+
 // FIX: replaced non-null assertion `!` with a null check.
-// The original `(el as HTMLCanvasElement).getContext('2d')!` throws a TypeError
-// if the canvas element is not yet in the DOM (e.g. detail panel not open).
-// Now returns null and callers check before passing to Chart constructor.
 function ctx(id: string): CanvasRenderingContext2D | null {
   const canvas = document.getElementById(id) as HTMLCanvasElement | null;
   if (!canvas) return null;

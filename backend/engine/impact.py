@@ -126,6 +126,9 @@ def _db_row_to_obs(row: dict) -> dict:       # DB
         "liq_remaining_series":   _jload(row.get("liq_remaining_series")),
         "cascade_events":         _jload(row.get("cascade_events_json")),
         "label_filled":           row.get("label_filled", 1),
+        # Cutoff fields: not stored in DB (stale after restart anyway)
+        "beyond_cutoff":          False,
+        "cutoff_price":           None,
     }
 
 
@@ -186,26 +189,10 @@ class ImpactRecorder:
             active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
         else:
-            # FIX: _tick_task singleton race.
-            #
-            # The original code called `await self._close_obs(sym)` first, then
-            # checked `self._tick_task is None or self._tick_task.done()` to
-            # decide whether to spawn the tick loop. Because `_close_obs` is a
-            # coroutine, it suspends at its own `await self._broadcast(...)` call.
-            # Two simultaneous liquidations could both reach the task-creation
-            # guard during that suspension window, both see _tick_task as None,
-            # and each spawn an independent _tick_loop — double-appending every
-            # series point for the life of the observation.
-            #
-            # Fix: ensure the task exists BEFORE any await.  We create it
-            # optimistically as soon as we know a new obs is needed.  The loop
-            # itself is safe to start early because it checks `self.active` on
-            # every iteration and exits immediately when it is empty.
+            # FIX: _tick_task singleton race — task created BEFORE any await.
             if self._tick_task is None or self._tick_task.done():
                 self._tick_task = asyncio.create_task(self._tick_loop())
 
-            # Close previous obs if there was one (may suspend here — task
-            # is already created above so no second spawner can race us).
             if active:
                 await self._close_obs(sym)
 
@@ -228,6 +215,9 @@ class ImpactRecorder:
                 "expected_price_series": [],
                 "price_series":          [],
                 "liq_remaining_series":  [],
+                # cutoff tracking (updated every tick)
+                "beyond_cutoff":         res["beyond_cutoff"],
+                "cutoff_price":          res["cutoff_price"],
                 "cascade_events":        [[now, usd_val, exchange]],
                 "final_expected_price":  None,
                 "actual_terminal_price": None,
@@ -261,6 +251,16 @@ class ImpactRecorder:
             obs["expected_price_series"].append([now, res["terminal_price"]])
             obs["price_series"].append([now, self._s.price])
             obs["liq_remaining_series"].append([now, obs["liq_remaining"]])
+
+            # Track cutoff: once beyond_cutoff is True it stays True for the
+            # life of the observation (pressure only decreases, so if we crossed
+            # the cutoff line we never come back within it on this cascade).
+            if res["beyond_cutoff"]:
+                obs["beyond_cutoff"] = True
+            # Always update cutoff_price in case the book was refreshed
+            if res["cutoff_price"] is not None:
+                obs["cutoff_price"] = res["cutoff_price"]
+
             if res["absorbed"]:
                 obs["absorbed_by_delta"] = True
             silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
@@ -311,6 +311,9 @@ class ImpactRecorder:
             "price_series":          [[ts(t), v] for t, v in obs["price_series"]],
             "liq_remaining_series":  [[ts(t), v] for t, v in obs["liq_remaining_series"]],
             "cascade_events":        [[ts(t), v, ex] for t, v, ex in obs["cascade_events"]],
+            # cutoff fields passed through as-is (bool + float|None)
+            "beyond_cutoff":         obs.get("beyond_cutoff", False),
+            "cutoff_price":          obs.get("cutoff_price"),
         }
 
     async def _broadcast_table_update(self):
