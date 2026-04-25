@@ -188,9 +188,17 @@ export function shiftVisibleRange(by: number) {
   priceChart.timeScale().setVisibleLogicalRange({ from: range.from + by, to: range.to + by });
 }
 
-/** Scrolls price chart to the latest candle; liq + delta follow via sync. */
+/**
+ * Scrolls all three charts to the latest candle.
+ * Calls scrollToRealTime() directly on each chart while holding the sync
+ * guard, so the sync subscribers don't fight each other and revert the scroll.
+ */
 export function scrollToLatest() {
+  _syncing = true;
   priceChart?.timeScale().scrollToRealTime();
+  liqChart?.timeScale().scrollToRealTime();
+  deltaChart?.timeScale().scrollToRealTime();
+  _syncing = false;
 }
 
 /** Returns the current visible logical range of the price chart. */
