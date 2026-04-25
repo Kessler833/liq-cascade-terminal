@@ -53,6 +53,11 @@ class ConnectionManager:
         # Persistent HTTP client — reused across all Binance REST calls to
         # avoid paying TLS handshake cost on every history fetch / lazy-load.
         self._http = httpx.AsyncClient(timeout=10.0)
+        # Generation counter: incremented on every reconnect_all().
+        # Each WS task captures its generation at start and exits immediately
+        # if self._gen has moved on, preventing stale tasks from writing into
+        # state that belongs to a newer symbol/tf context.
+        self._gen: int = 0
 
     # expose for REST layer
     @property
@@ -81,17 +86,18 @@ class ConnectionManager:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self._s.connected_ws = 0
+        self._gen += 1          # invalidate all previously spawned tasks
         await self._connect_all()
 
     async def _connect_all(self):
         sym = self._s.symbol
         self._tasks = [
-            asyncio.create_task(self._run_binance(sym), name="binance"),
-            asyncio.create_task(self._run_bybit(sym),   name="bybit"),
-            asyncio.create_task(self._run_okx(sym),     name="okx"),
-            asyncio.create_task(self._run_bitget(sym),  name="bitget"),
-            asyncio.create_task(self._run_gate(sym),    name="gate"),
-            asyncio.create_task(self._run_dydx(sym),    name="dydx"),
+            asyncio.create_task(self._run_binance(sym, self._gen), name="binance"),
+            asyncio.create_task(self._run_bybit(sym, self._gen),   name="bybit"),
+            asyncio.create_task(self._run_okx(sym, self._gen),     name="okx"),
+            asyncio.create_task(self._run_bitget(sym, self._gen),  name="bitget"),
+            asyncio.create_task(self._run_gate(sym, self._gen),    name="gate"),
+            asyncio.create_task(self._run_dydx(sym, self._gen),    name="dydx"),
         ]
 
     # ------------------------------------------------------------------
@@ -115,7 +121,10 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # History fetch (Binance REST)
     # ------------------------------------------------------------------
-    async def _fetch_binance_history(self, sym: str, tf: str):
+    async def _fetch_binance_history(self, sym: str, tf: str, gen: int = -1):
+        """Fetch 500 candles from Binance REST and broadcast as 'history'.
+        If gen is provided, aborts before broadcasting if generation has moved on.
+        """
         from engine.state import SYMBOL_MAP, TF_BINANCE
         s_name = SYMBOL_MAP[sym]["binance"].upper()
         tf_b   = TF_BINANCE[tf]
@@ -124,6 +133,9 @@ class ConnectionManager:
             r = await self._http.get(url)
             r.raise_for_status()
             data = r.json()
+            # Stale-response guard: abort if a newer reconnect has already run
+            if gen >= 0 and self._gen != gen:
+                return
             if not isinstance(data, list):
                 return
             self._s.candles = [
@@ -151,10 +163,13 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Binance
     # ------------------------------------------------------------------
-    async def _run_binance(self, sym: str):
+    async def _run_binance(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP, TF_BINANCE
         await self._set_dot("binance", "connecting")
         while True:
+            # Stale-generation exit: stop immediately if reconnect_all() fired again
+            if self._gen != gen:
+                return
             s_name = SYMBOL_MAP[sym]["binance"]
             tf_b   = TF_BINANCE[self._s.timeframe]
             url = (f"wss://fstream.binance.com/stream?streams="
@@ -163,10 +178,10 @@ class ConnectionManager:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
                     log.debug("Binance: connected")
-                    asyncio.create_task(self._fetch_binance_history(sym, self._s.timeframe))
+                    asyncio.create_task(self._fetch_binance_history(sym, self._s.timeframe, gen))
                     async for raw in ws:
-                        if self._s.symbol != sym:
-                            break
+                        if self._gen != gen:
+                            return
                         msg = _safe_json(raw)
                         if not msg or "stream" not in msg:
                             continue
@@ -179,9 +194,11 @@ class ConnectionManager:
                         elif "aggTrade" in stream:
                             await self._handle_binance_trade(data)
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"Binance WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("binance")
             await asyncio.sleep(RECONNECT_DELAY)
 
@@ -207,12 +224,14 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Bybit
     # ------------------------------------------------------------------
-    async def _run_bybit(self, sym: str):
+    async def _run_bybit(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("bybit", "connecting")
         s_name = SYMBOL_MAP[sym]["bybit"]
         url = "wss://stream.bybit.com/v5/public/linear"
         while True:
+            if self._gen != gen:
+                return
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bybit")
@@ -223,8 +242,8 @@ class ConnectionManager:
                     ping_task = asyncio.create_task(self._bybit_ping(ws))
                     try:
                         async for raw in ws:
-                            if self._s.symbol != sym:
-                                break
+                            if self._gen != gen:
+                                return
                             msg = _safe_json(raw)
                             if not msg or "topic" not in msg:
                                 continue
@@ -245,9 +264,11 @@ class ConnectionManager:
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"Bybit WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("bybit")
             await asyncio.sleep(RECONNECT_DELAY)
 
@@ -262,12 +283,14 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # OKX
     # ------------------------------------------------------------------
-    async def _run_okx(self, sym: str):
+    async def _run_okx(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("okx", "connecting")
         s_name = SYMBOL_MAP[sym]["okx"]
         url = "wss://ws.okx.com:8443/ws/v5/public"
         while True:
+            if self._gen != gen:
+                return
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("okx")
@@ -279,8 +302,8 @@ class ConnectionManager:
                     ping_task = asyncio.create_task(self._okx_ping(ws))
                     try:
                         async for raw in ws:
-                            if self._s.symbol != sym:
-                                break
+                            if self._gen != gen:
+                                return
                             if raw == "pong":
                                 continue
                             msg = _safe_json(raw)
@@ -310,9 +333,11 @@ class ConnectionManager:
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"OKX WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("okx")
             await asyncio.sleep(RECONNECT_DELAY)
 
@@ -327,12 +352,14 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Bitget
     # ------------------------------------------------------------------
-    async def _run_bitget(self, sym: str):
+    async def _run_bitget(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("bitget", "connecting")
         s_name = SYMBOL_MAP[sym]["bitget"]
         url = "wss://ws.bitget.com/v2/ws/public"
         while True:
+            if self._gen != gen:
+                return
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bitget")
@@ -344,8 +371,8 @@ class ConnectionManager:
                     ping_task = asyncio.create_task(self._bitget_ping(ws))
                     try:
                         async for raw in ws:
-                            if self._s.symbol != sym:
-                                break
+                            if self._gen != gen:
+                                return
                             if raw == "pong":
                                 continue
                             msg = _safe_json(raw)
@@ -373,9 +400,11 @@ class ConnectionManager:
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"Bitget WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("bitget")
             await asyncio.sleep(RECONNECT_DELAY)
 
@@ -390,12 +419,14 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # Gate
     # ------------------------------------------------------------------
-    async def _run_gate(self, sym: str):
+    async def _run_gate(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("gate", "connecting")
         s_name = SYMBOL_MAP[sym]["gate"]
         url = "wss://fx-ws.gateio.ws/v4/ws/usdt"
         while True:
+            if self._gen != gen:
+                return
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("gate")
@@ -406,8 +437,8 @@ class ConnectionManager:
                     ping_task = asyncio.create_task(self._gate_ping(ws))
                     try:
                         async for raw in ws:
-                            if self._s.symbol != sym:
-                                break
+                            if self._gen != gen:
+                                return
                             msg = _safe_json(raw)
                             if not msg or "channel" not in msg:
                                 continue
@@ -433,9 +464,11 @@ class ConnectionManager:
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"Gate WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("gate")
             await asyncio.sleep(RECONNECT_DELAY)
 
@@ -450,20 +483,22 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # dYdX
     # ------------------------------------------------------------------
-    async def _run_dydx(self, sym: str):
+    async def _run_dydx(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("dydx", "connecting")
         s_name = SYMBOL_MAP[sym]["dydx"]
         url = "wss://indexer.dydx.trade/v4/ws"
         while True:
+            if self._gen != gen:
+                return
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("dydx")
                     log.debug("dYdX: connected")
                     await ws.send(json.dumps({"type": "subscribe", "channel": "v4_trades", "id": s_name}))
                     async for raw in ws:
-                        if self._s.symbol != sym:
-                            break
+                        if self._gen != gen:
+                            return
                         msg = _safe_json(raw)
                         if not msg or "contents" not in msg:
                             continue
@@ -483,8 +518,10 @@ class ConnectionManager:
                                 await self._strategy.on_liquidation("dydx", liq_side, vol * 0.08, price, s_name)
                                 await self._impact.on_liquidation("dydx", liq_side, vol * 0.08, price)
             except asyncio.CancelledError:
-                break
+                return
             except Exception as e:
                 log.debug(f"dYdX WS error: {e}")
+            if self._gen != gen:
+                return
             await self._on_disconnected("dydx")
             await asyncio.sleep(RECONNECT_DELAY)
