@@ -7,6 +7,7 @@ import asyncio
 import logging
 import math
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 if TYPE_CHECKING:
@@ -14,6 +15,10 @@ if TYPE_CHECKING:
     from engine.l2_model import L2Model
 
 log = logging.getLogger("liqterm.strategy")
+
+# Rolling 60s window for the /m rate display.
+# Each entry is (timestamp_s, usd_val).
+_LIQ_WINDOW_S = 60.0
 
 
 class Strategy:
@@ -28,6 +33,10 @@ class Strategy:
         self._broadcast = broadcast
         self._last_tick_ms: int = 0
         self._tick_throttle_ms: int = 100
+        # FIX: rolling deque replaces the hard-reset liq_1m_bucket.
+        # Each entry is (wall_time_s, usd_val). Entries older than 60s are
+        # evicted on every liquidation, so the window is always current.
+        self._liq_window: deque[tuple[float, float]] = deque()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -87,7 +96,10 @@ class Strategy:
             if db is None:
                 db = {"t": t, "delta": 0.0, "cum_delta": 0.0}
                 self._s.delta_bars.append(db)
-            db["delta"] += grouped[t]
+            # FIX: use assignment (=) not augmented assignment (+=).
+            # apply_delta_store rebuilds delta_bars from scratch after a
+            # history re-fetch, so += would double-count on repeated calls.
+            db["delta"] = grouped[t]
             db["cum_delta"] = cum
         self._s.delta_bars.sort(key=lambda b: b["t"])
         if cum != 0:
@@ -264,11 +276,13 @@ class Strategy:
         else:
             lb["short_usd"] += usd_val
 
+        # FIX: rolling 60s window instead of hard-reset bucket.
+        # Evict entries older than 60s, append current event, then sum the window.
         now_s = time.time()
-        if now_s - s.liq_1m_timestamp > 60:
-            s.liq_1m_bucket = 0.0
-            s.liq_1m_timestamp = now_s
-        s.liq_1m_bucket += usd_val
+        self._liq_window.append((now_s, usd_val))
+        while self._liq_window and self._liq_window[0][0] < now_s - _LIQ_WINDOW_S:
+            self._liq_window.popleft()
+        s.liq_1m_bucket = sum(v for _, v in self._liq_window)
 
         await self._detect_cascade(usd_val)
 
@@ -340,9 +354,13 @@ class Strategy:
     async def _cascade_timeout(self):
         await asyncio.sleep(30)
         s = self._s
+        # FIX: always reset cascade_score when the 30s timer fires, regardless
+        # of current phase. If a delta flip moved phase to "long" or "short"
+        # before the timer expired, the stale score would accumulate into the
+        # next cycle and trigger a false early cascade.
+        s.cascade_score = 0.0
         if s.phase == "cascade":
             s.phase = "watching"
-            s.cascade_score = 0.0
             self._add_log("Cascade ended. Watching delta for entry...", "info")
             await self._broadcast({
                 "type": "phase",

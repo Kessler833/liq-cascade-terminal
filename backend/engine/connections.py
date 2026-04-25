@@ -138,9 +138,13 @@ class ConnectionManager:
         await self._hub.broadcast({"type": "conn_status", "exchange": name, "status": status})
 
     async def _on_connected(self, name: str):
-        if self._dot_status.get(name) != "connected":
-            self._s.connected_ws += 1
+        # FIX: read the previous status BEFORE calling _set_dot, which overwrites
+        # _dot_status[name]. On rapid reconnects this prevents double-counting a
+        # single exchange and pushing connected_ws above the max of 6.
+        was_connected = self._dot_status.get(name) == "connected"
         await self._set_dot(name, "connected")
+        if not was_connected:
+            self._s.connected_ws += 1
         await self._hub.broadcast({"type": "ws_count", "count": self._s.connected_ws})
 
     async def _on_disconnected(self, name: str):
@@ -679,7 +683,9 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # dYdX — subscribes to ALL symbols
+    # dYdX — trade stream only (no liquidation stream exists on v4).
+    # The previous heuristic that marked any trade >$50k as 8% liq volume
+    # was synthetic and polluted the impact model. Removed entirely.
     # ------------------------------------------------------------------
     async def _run_dydx(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -720,15 +726,9 @@ class ConnectionManager:
                             await self._strategy.update_price_tick(
                                 price, notional, ts_ms, event_sym
                             )
-                            if notional > 50_000:
-                                liq_side = "short" if is_buy else "long"
-                                await self._strategy.on_liquidation(
-                                    "dydx", liq_side, notional * 0.08, price, msg_id, event_sym
-                                )
-                                if event_sym == self._s.symbol:
-                                    await self._impact.on_liquidation(
-                                        "dydx", liq_side, notional * 0.08, price
-                                    )
+                            # NOTE: dYdX v4 has no liquidation feed. The previous
+                            # heuristic ($50k threshold + 8% multiplier) was synthetic
+                            # and has been removed to avoid polluting the impact model.
             except asyncio.CancelledError:
                 return
             except Exception as e:

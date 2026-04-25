@@ -21,7 +21,27 @@ log = logging.getLogger("liqterm.l2")
 
 BOOK_DEPTH    = 20       # levels to fetch
 REFRESH_S     = 5.0      # re-fetch interval
-DELTA_FACTOR  = 0.000_01 # delta influence per dollar
+
+# FIX: DELTA_FACTOR was 0.00001, giving an absorption threshold of ~$30k net
+# cumulative delta — crossed within seconds on any live BTC session, making
+# absorbed_by_delta permanently True. Raised to a value that requires ~$10M
+# net delta to produce a 10% adjustment (realistic for meaningful absorption).
+DELTA_FACTOR  = 0.000_000_01  # delta influence per dollar (was 0.00001)
+
+# Per-symbol book exhaustion extrapolation constants.
+# The original 0.5% flat constant was too small for thin-book assets.
+# Real book exhaustion on LINK/SUI/AVAX causes 2-5% moves.
+EXTRAP_PCT: dict[str, float] = {
+    "BTC":  0.5,
+    "ETH":  0.8,
+    "SOL":  1.5,
+    "XRP":  1.5,
+    "DOGE": 2.0,
+    "AVAX": 3.0,
+    "LINK": 3.0,
+    "SUI":  3.0,
+}
+DEFAULT_EXTRAP_PCT = 2.0
 
 
 class L2Model:
@@ -30,6 +50,10 @@ class L2Model:
         self._bids: list[tuple[float, float]] = []  # (price, qty)
         self._asks: list[tuple[float, float]] = []
         self._task: asyncio.Task | None = None
+        # FIX: single shared AsyncClient — avoids creating a new TLS connection
+        # every 5 seconds (the original code used `async with httpx.AsyncClient()`
+        # inside _fetch_book, which defeats connection pooling entirely).
+        self._http = httpx.AsyncClient(timeout=5.0)
 
     async def start(self):
         self._task = asyncio.create_task(self._refresh_loop(), name="l2_refresh")
@@ -38,6 +62,7 @@ class L2Model:
         if self._task:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        await self._http.aclose()
 
     # ------------------------------------------------------------------
     async def _refresh_loop(self):
@@ -51,10 +76,9 @@ class L2Model:
         s_name = SYMBOL_MAP.get(sym, {}).get("binance", "btcusdt").upper()
         url    = f"https://fapi.binance.com/fapi/v1/depth?symbol={s_name}&limit={BOOK_DEPTH}"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(url)
-                r.raise_for_status()
-                data = r.json()
+            r = await self._http.get(url)
+            r.raise_for_status()
+            data = r.json()
             self._bids = [(float(p), float(q)) for p, q in data.get("bids", [])]
             self._asks = [(float(p), float(q)) for p, q in data.get("asks", [])]
         except Exception as e:
@@ -76,6 +100,7 @@ class L2Model:
         """
         mid   = self._s.price or 0.0
         book  = self._asks if side == "long" else self._bids
+        sym   = self._s.symbol
 
         if not book or mid == 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False}
@@ -94,8 +119,9 @@ class L2Model:
             terminal   = price
             consumed  += 1
         else:
-            # Exhausted visible book — extrapolate 0.5% per full level
-            extra_pct  = (remaining / liq_notional) * 0.5
+            # Exhausted visible book — extrapolate using per-symbol constant.
+            extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
+            extra_pct  = (remaining / liq_notional) * extrap_pct
             if side == "long":
                 terminal *= (1 + extra_pct / 100)
             else:
@@ -108,6 +134,9 @@ class L2Model:
         else:
             terminal *= (1 + max(-0.5, min(0.5, delta_adj)))
 
+        # FIX: absorbed threshold is now meaningful. With the corrected
+        # DELTA_FACTOR, delta_adj > 0.3 requires ~$30M net cumulative delta,
+        # which represents genuine market-wide absorption pressure.
         absorbed = abs(delta_adj) > 0.3 and (
             (side == "long"  and delta_adj > 0) or
             (side == "short" and delta_adj < 0)
