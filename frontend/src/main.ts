@@ -16,7 +16,8 @@ import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLiqChart, updateDeltaChart,
   updateLastCandle, resizeAll, setupChartSync,
-  onNearLeftEdge, shiftVisibleRange, fitAllCharts,
+  onNearLeftEdge, getVisibleLogicalRange, setVisibleLogicalRange,
+  scrollToLatest, fitAllCharts,
 } from './charts';
 
 // ---- Init charts ----
@@ -43,13 +44,21 @@ async function loadMoreCandles() {
     const tSet = new Set(state.candles.map((c: Candle) => c.t));
     const fresh = data.candles.filter((c: any) => !tSet.has(c.t));
     if (!fresh.length) return;
+    // Save viewport position before prepend to avoid snap
+    const savedRange = getVisibleLogicalRange();
     state.candles    = [...fresh, ...state.candles];
     state.liq_bars   = [...fresh.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 })), ...state.liq_bars];
     state.delta_bars = [...fresh.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 })), ...state.delta_bars];
     updatePriceChart(state.candles);
     updateLiqChart(state.liq_bars);
     updateDeltaChart(state.delta_bars);
-    shiftVisibleRange(fresh.length);
+    // Shift viewport by the number of prepended candles
+    if (savedRange) {
+      setVisibleLogicalRange({
+        from: savedRange.from + fresh.length,
+        to:   savedRange.to  + fresh.length,
+      });
+    }
     prependLogItem({ msg: `Loaded ${fresh.length} older candles`, type: 'info', ts: Date.now() });
     updateStatusBar({ candles: state.candles.length });
   } finally {
@@ -60,7 +69,6 @@ async function loadMoreCandles() {
 onNearLeftEdge(() => { if (!_loadingMore) loadMoreCandles(); });
 
 // ---- Suppress connection log noise during intentional reconnects ----
-// Set when user switches symbol/TF; cleared 8s later or when 6/6 connects.
 let _lastSwitch = 0;
 const QUIET_MS = 8000;
 function inQuietPeriod() { return Date.now() - _lastSwitch < QUIET_MS; }
@@ -71,8 +79,26 @@ initControls(
   async (sym) => {
     _lastSwitch = Date.now();
     prependLogItem({ msg: `Switching to ${sym}...`, type: 'sys', ts: Date.now() });
-    await api.setSymbol(sym);
+    api.setSymbol(sym);          // fire-and-forget — backend reconnects in background
     state.symbol = sym;
+    // Immediately fetch REST history so chart updates within ~1s
+    try {
+      const data = await api.fetchHistory(sym, state.timeframe);
+      if (state.symbol !== sym) return;  // user switched again before response
+      if (data.candles?.length) {
+        state.candles    = data.candles;
+        state.liq_bars   = data.candles.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 }));
+        state.delta_bars = data.candles.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 }));
+        updatePriceChart(state.candles);
+        updateLiqChart(state.liq_bars);
+        updateDeltaChart(state.delta_bars);
+        scrollToLatest();
+        updateCandleLabel(sym, state.timeframe);
+        updateStatusBar({ symbol: sym, candles: state.candles.length, lastUpdate: true });
+      }
+    } catch (_e) {
+      // Backend will push history via WS history message shortly
+    }
   },
   async (tf) => {
     _lastSwitch = Date.now();
@@ -111,6 +137,7 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      scrollToLatest();
       renderFeed(state.feed);
       renderLog(state.signal_log);
       prependLogItem({ msg: `System ready · ${state.symbol} ${state.timeframe} · ${state.candles.length} candles`, type: 'sys', ts: Date.now() });
@@ -130,7 +157,6 @@ onMessage((msg: ServerMsg) => {
       state.price = msg.c;
       updatePrice(msg.c);
       if (msg.closed) {
-        // Replace if the candle already exists (prevents duplicates at boundary)
         const idx = state.candles.findIndex(x => x.t === c.t);
         if (idx >= 0) {
           state.candles[idx] = c;
@@ -199,7 +225,6 @@ onMessage((msg: ServerMsg) => {
     case 'conn_status': {
       state.conn_status[msg.exchange] = msg.status;
       updateConnDot(msg.exchange, msg.status);
-      // Only log errors outside the quiet window; skip "connecting" entirely
       if (msg.status === 'error' && !inQuietPeriod()) {
         prependLogItem({
           msg: `${msg.exchange.toUpperCase()}: error — reconnecting`,
@@ -213,9 +238,8 @@ onMessage((msg: ServerMsg) => {
     case 'ws_count': {
       state.connected_ws = msg.count;
       updateStatusBar({ wsCount: msg.count });
-      // Log once when all connections are up after a switch
       if (msg.count === 6 && inQuietPeriod()) {
-        _lastSwitch = 0; // clear quiet period early
+        _lastSwitch = 0;
         prependLogItem({ msg: 'All 6 exchange feeds connected', type: 'conn', ts: Date.now() });
       }
       break;
@@ -226,12 +250,12 @@ onMessage((msg: ServerMsg) => {
       state.liq_bars   = msg.liq_bars;
       state.delta_bars = msg.delta_bars;
       state.price      = msg.price;
-      _loadingMore     = false; // cancel any in-flight lazy-load
+      _loadingMore     = false;
       updatePrice(msg.price);
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
-      fitAllCharts();
+      scrollToLatest();
       prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;

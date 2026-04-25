@@ -4,8 +4,9 @@ Exposes:
   WS  /ws                  — single broadcast channel to all frontend clients
   GET /api/state           — snapshot of AppState
   GET /api/candles         — ?sym=BTC&tf=5m  (returns cached candles)
+  GET /api/history         — ?sym=BTC&tf=5m&limit=500[&before=<ms>]  (REST candle fetch)
   GET /api/impact          — impact observations
-  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol)
+  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; reconnect is fire-and-forget)
   POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe)
   GET /healthz             — liveness probe
 """
@@ -167,13 +168,18 @@ async def get_candles(sym: str = "BTC", tf: str = "5m"):
 
 
 @app.get("/api/history")
-async def get_history(sym: str = "BTC", tf: str = "5m", before: int = 0):
+async def get_history(sym: str = "BTC", tf: str = "5m", before: int = 0, limit: int = 500):
+    """REST candle fetch.
+    - before: endTime in ms for lazy-load pagination (omit for latest)
+    - limit: max candles to return (capped at 500)
+    """
     from engine.state import SYMBOL_MAP, TF_BINANCE
     import httpx
-    mapping = SYMBOL_MAP.get(sym, {})
+    mapping = SYMBOL_MAP.get(sym.upper(), {})
     s_name  = mapping.get("binance", "btcusdt").upper()
     tf_b    = TF_BINANCE.get(tf, "5m")
-    url     = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit=300"
+    limit   = min(max(limit, 1), 500)
+    url     = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit={limit}"
     if before:
         url += f"&endTime={before - 1}"
     try:
@@ -220,7 +226,8 @@ async def set_symbol(req: SymbolRequest):
     app_state.reset_stats()
     await hub.broadcast({"type": "symbol_change", "symbol": sym})
     if conn_mgr:
-        await conn_mgr.reconnect_all()
+        # Fire-and-forget so REST response returns immediately
+        asyncio.create_task(conn_mgr.reconnect_all())
     return {"ok": True, "symbol": sym}
 
 
@@ -237,7 +244,6 @@ async def set_timeframe(req: TimeframeRequest):
     app_state.liq_bars  = []
     app_state.delta_bars= []
     await hub.broadcast({"type": "timeframe_change", "timeframe": tf})
-    # Re-fetch history with new TF (connections stay open)
     if conn_mgr:
         asyncio.create_task(
             conn_mgr._fetch_binance_history(app_state.symbol, tf)

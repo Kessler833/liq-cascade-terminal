@@ -14,7 +14,7 @@ export function onMessage(fn: Handler) {
 }
 
 export function connectWS() {
-  if (_ws && _ws.readyState < 2) return;   // already open/connecting
+  if (_ws && _ws.readyState < 2) return;
   _ws = new WebSocket(WS_URL);
 
   _ws.onopen = () => {
@@ -54,6 +54,10 @@ export const api = {
   setTimeframe: (timeframe: string) => post('/api/timeframe', { timeframe }),
   getState:     ()                  => fetch('/api/state').then(r => r.json()),
   getImpact:    ()                  => fetch('/api/impact').then(r => r.json()),
-  fetchHistory: (sym: string, tf: string, before: number) =>
-    fetch(`/api/history?sym=${sym}&tf=${tf}&before=${before}`).then(r => r.json()),
+  // before: endTime in ms for lazy-load pagination; omit for latest 500 candles
+  fetchHistory: (sym: string, tf: string, before = 0) => {
+    const params = new URLSearchParams({ sym, tf, limit: '500' });
+    if (before) params.set('before', String(before));
+    return fetch(`/api/history?${params}`).then(r => r.json());
+  },
 };
