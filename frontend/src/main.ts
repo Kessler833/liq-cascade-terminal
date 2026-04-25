@@ -189,7 +189,11 @@ onMessage((msg: ServerMsg) => {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
       updatePrice(msg.c);
-      const idx = state.candles.findLastIndex((x: Candle) => x.t === c.t);
+      // FIX: use findIndex (same as the kline handler) instead of findLastIndex.
+      // findLastIndex would update a different candle object than findIndex if
+      // duplicate `t` entries exist, causing a silent chart split. Both handlers
+      // must consistently target the FIRST matching candle.
+      const idx = state.candles.findIndex((x: Candle) => x.t === c.t);
       if (idx >= 0) {
         state.candles[idx] = c;
       } else {
@@ -331,7 +335,7 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
-    // ---- IMPACT TAB — was previously broken (no render call) ----
+    // ---- IMPACT TAB ----
     case 'impact_update': {
       state.impact_obs = msg.observations;
       updateImpact(msg.observations, msg.stats);

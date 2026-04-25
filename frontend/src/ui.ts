@@ -95,7 +95,6 @@ export function updateStats(stats: Stats) {
   setText('stat-longs',    fmtUSD(stats.longs_liq_usd));
   setText('stat-shorts',   fmtUSD(stats.shorts_liq_usd));
   setText('liqRate1m',     fmtUSD(stats.liq_1m_bucket) + '/m');
-  // Delta display with color
   const dEl = document.getElementById('deltaDisplay');
   if (dEl) {
     dEl.textContent = fmtDelta(stats.cumulative_delta);
@@ -175,13 +174,18 @@ export function prependFeedItem(item: FeedItem) {
   const list = document.getElementById('liq-feed');
   if (!list) return;
   const row = el('div', `feed-item ${item.side}`);
-  row.innerHTML = `
-    <span class="feed-exch">${item.exchange.slice(0,4).toUpperCase()}</span>
-    <span class="feed-side">${item.side.toUpperCase()}</span>
-    <span class="feed-sym">${item.symbol}</span>
-    <span class="feed-size">${fmtUSD(item.usd_val)}</span>
-    <span class="feed-price">@ ${fmtPrice(item.price)}</span>
-    <span class="feed-time">${fmtTime(item.ts)}</span>`;
+  // FIX: item.symbol came from an exchange WebSocket payload and was interpolated
+  // directly into innerHTML, creating a latent XSS vector. Use textContent on
+  // individual child elements instead so no exchange-provided value is ever
+  // treated as HTML markup.
+  const exchSpan  = el('span', 'feed-exch', item.exchange.slice(0, 4).toUpperCase());
+  const sideSpan  = el('span', 'feed-side', item.side.toUpperCase());
+  const symSpan   = el('span', 'feed-sym');
+  symSpan.textContent = item.symbol;   // always textContent, never innerHTML
+  const sizeSpan  = el('span', 'feed-size',  fmtUSD(item.usd_val));
+  const priceSpan = el('span', 'feed-price', '@ ' + fmtPrice(item.price));
+  const timeSpan  = el('span', 'feed-time',  fmtTime(item.ts));
+  row.append(exchSpan, sideSpan, symSpan, sizeSpan, priceSpan, timeSpan);
   list.insertBefore(row, list.firstChild);
   while (list.children.length > 80) list.removeChild(list.lastChild!);
   const ct = document.getElementById('feedCount');

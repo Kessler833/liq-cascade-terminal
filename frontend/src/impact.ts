@@ -141,7 +141,6 @@ function renderTable(): void {
 // ---- detail panel ----
 
 function openDetail(id: string): void {
-  // Toggle: clicking an already-selected row closes the panel
   if (_selectedId === id) { closeDetail(); return; }
 
   const obs = _allObs.find(o => o.id === id);
@@ -199,30 +198,33 @@ function renderDetailCharts(obs: ImpactObs): void {
   if (deltaSeries && deltaSeries.length > 1) {
     const labels = elapsedLabels(deltaSeries, origin);
     const data   = deltaSeries.map(([, v]) => v);
-    _charts.delta = new Chart(
-      ctx('imp-chart-delta'),
-      {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            {
-              data,
-              borderWidth: 1.5,
-              pointRadius: 0,
-              tension: 0.3,
-              fill: { target: { value: 0 }, above: 'rgba(255,61,90,0.07)', below: 'rgba(0,230,118,0.07)' },
-              segment: {
-                borderColor: (c: any) => c.p0.parsed.y <= 0 ? 'rgba(0,230,118,0.8)' : 'rgba(255,61,90,0.8)',
+    const canvasCtx = ctx('imp-chart-delta');
+    if (canvasCtx) {
+      _charts.delta = new Chart(
+        canvasCtx,
+        {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              {
+                data,
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.3,
+                fill: { target: { value: 0 }, above: 'rgba(255,61,90,0.07)', below: 'rgba(0,230,118,0.07)' },
+                segment: {
+                  borderColor: (c: any) => c.p0.parsed.y <= 0 ? 'rgba(0,230,118,0.8)' : 'rgba(255,61,90,0.8)',
+                },
               },
-            },
-            refLine(labels, 0, 'rgba(122,132,153,0.3)', ''),
-            ...cascadeAnnotations(cascadeEvents, deltaSeries, origin),
-          ],
-        },
-        options: chartOpts('Delta (USD)', fmtUSD),
-      }
-    );
+              refLine(labels, 0, 'rgba(122,132,153,0.3)', ''),
+              ...cascadeAnnotations(cascadeEvents, deltaSeries, origin),
+            ],
+          },
+          options: chartOpts('Delta (USD)', fmtUSD),
+        }
+      );
+    }
   }
 
   // ---- Chart 2: Predicted Terminal Price ----
@@ -231,24 +233,27 @@ function renderDetailCharts(obs: ImpactObs): void {
     const labels = elapsedLabels(expSeries, origin);
     const data   = expSeries.map(([, v]) => v);
     const sideLineColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)' : 'rgba(0,230,118,0.85)';
-    _charts.expected = new Chart(
-      ctx('imp-chart-expected'),
-      {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { data, borderColor: sideLineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
-            ...(obs.actual_terminal_price != null
-              ? [refLine(labels, obs.actual_terminal_price, 'rgba(0,230,118,0.55)', 'Actual')]
-              : []),
-            ...cascadeAnnotations(cascadeEvents, expSeries, origin),
-          ],
-        },
-        options: chartOpts('Predicted price', fmtPrice),
-      }
-    );
+    const canvasCtx = ctx('imp-chart-expected');
+    if (canvasCtx) {
+      _charts.expected = new Chart(
+        canvasCtx,
+        {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { data, borderColor: sideLineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
+              refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
+              ...(obs.actual_terminal_price != null
+                ? [refLine(labels, obs.actual_terminal_price, 'rgba(0,230,118,0.55)', 'Actual')]
+                : []),
+              ...cascadeAnnotations(cascadeEvents, expSeries, origin),
+            ],
+          },
+          options: chartOpts('Predicted price', fmtPrice),
+        }
+      );
+    }
   }
 
   // ---- Chart 3: Actual Price ----
@@ -256,24 +261,27 @@ function renderDetailCharts(obs: ImpactObs): void {
   if (priceSeries && priceSeries.length > 1) {
     const labels = elapsedLabels(priceSeries, origin);
     const data   = priceSeries.map(([, v]) => v);
-    _charts.price = new Chart(
-      ctx('imp-chart-price'),
-      {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
-            ...(obs.final_expected_price != null
-              ? [refLine(labels, obs.final_expected_price, 'rgba(255,157,0,0.6)', 'Model stop')]
-              : []),
-            ...cascadeAnnotations(cascadeEvents, priceSeries, origin),
-          ],
-        },
-        options: chartOpts('Price', fmtPrice),
-      }
-    );
+    const canvasCtx = ctx('imp-chart-price');
+    if (canvasCtx) {
+      _charts.price = new Chart(
+        canvasCtx,
+        {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
+              refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
+              ...(obs.final_expected_price != null
+                ? [refLine(labels, obs.final_expected_price, 'rgba(255,157,0,0.6)', 'Model stop')]
+                : []),
+              ...cascadeAnnotations(cascadeEvents, priceSeries, origin),
+            ],
+          },
+          options: chartOpts('Price', fmtPrice),
+        }
+      );
+    }
   }
 
   // ---- Chart 4: LIQ Remaining (depleting tank) ----
@@ -283,21 +291,24 @@ function renderDetailCharts(obs: ImpactObs): void {
     const data      = liqSeries.map(([, v]) => v);
     const fillColor = obs.side === 'long' ? 'rgba(255,61,90,0.18)' : 'rgba(0,230,118,0.18)';
     const lineColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)'  : 'rgba(0,230,118,0.85)';
-    _charts.tank = new Chart(
-      ctx('imp-chart-tank'),
-      {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { data, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: 'origin', backgroundColor: fillColor },
-            refLine(labels, 0, 'rgba(122,132,153,0.35)', 'Exhausted'),
-            ...cascadeAnnotations(cascadeEvents, liqSeries, origin),
-          ],
-        },
-        options: chartOpts('LIQ remaining (USD)', fmtUSD),
-      }
-    );
+    const canvasCtx = ctx('imp-chart-tank');
+    if (canvasCtx) {
+      _charts.tank = new Chart(
+        canvasCtx,
+        {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { data, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: 'origin', backgroundColor: fillColor },
+              refLine(labels, 0, 'rgba(122,132,153,0.35)', 'Exhausted'),
+              ...cascadeAnnotations(cascadeEvents, liqSeries, origin),
+            ],
+          },
+          options: chartOpts('LIQ remaining (USD)', fmtUSD),
+        }
+      );
+    }
   }
 }
 
@@ -309,7 +320,6 @@ function elapsedLabels(series: TimeSeries, origin: number): string[] {
   return series.map(([t]) => ((t - origin) / 1000).toFixed(1) + 's');
 }
 
-/** Build vertical-line markers for cascade join events as thin scatter points */
 function cascadeAnnotations(
   events: [number, number, string][],
   series: TimeSeries,
@@ -317,16 +327,12 @@ function cascadeAnnotations(
 ): object[] {
   if (events.length <= 1 || series.length === 0) return [];
 
-  // For each cascade event after the first, find the closest series label index
-  // and inject a vertical scatter marker at that x position.
   const labels = elapsedLabels(series, origin);
 
   return events.slice(1).map(([ts, vol]) => {
     const elapsed = ((ts - origin) / 1000).toFixed(1) + 's';
-    // Find nearest label
     const idx = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
     const targetLabel = idx >= 0 ? labels[idx] : labels[labels.length - 1];
-    // Build a point dataset that only has a value at the marker position
     const pointData = labels.map(l => (l === targetLabel ? 0 : null));
     return {
       type: 'scatter',
@@ -385,8 +391,14 @@ function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
   };
 }
 
-function ctx(id: string): CanvasRenderingContext2D {
-  return (document.getElementById(id) as HTMLCanvasElement).getContext('2d')!;
+// FIX: replaced non-null assertion `!` with a null check.
+// The original `(el as HTMLCanvasElement).getContext('2d')!` throws a TypeError
+// if the canvas element is not yet in the DOM (e.g. detail panel not open).
+// Now returns null and callers check before passing to Chart constructor.
+function ctx(id: string): CanvasRenderingContext2D | null {
+  const canvas = document.getElementById(id) as HTMLCanvasElement | null;
+  if (!canvas) return null;
+  return canvas.getContext('2d');
 }
 
 // ---- misc helpers ----
