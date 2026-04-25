@@ -4,9 +4,9 @@ Exposes:
   WS  /ws                  — single broadcast channel to all frontend clients
   GET /api/state           — snapshot of AppState
   GET /api/candles         — ?sym=BTC&tf=5m  (returns cached candles)
-  GET /api/history         — ?sym=BTC&tf=5m&limit=500  (REST candle fetch for fast symbol switching)
+  GET /api/history         — ?sym=BTC&tf=5m&limit=500[&before=<ms>]  (REST candle fetch)
   GET /api/impact          — impact observations
-  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol)
+  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; reconnect is fire-and-forget)
   POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe)
   GET /healthz             — liveness probe
 """
@@ -123,9 +123,9 @@ def _build_snapshot() -> dict:
         "timeframe": s.timeframe,
         "price":     s.price,
         "phase":     s.phase,
-        "candles":   s.candles[-100:],
-        "liq_bars":  s.liq_bars[-100:],
-        "delta_bars":s.delta_bars[-100:],
+        "candles":   s.candles,
+        "liq_bars":  s.liq_bars,
+        "delta_bars":s.delta_bars,
         "feed":      s.feed[:40],
         "signal_log":s.signal_log[:30],
         "stats": {
@@ -168,39 +168,33 @@ async def get_candles(sym: str = "BTC", tf: str = "5m"):
 
 
 @app.get("/api/history")
-async def get_history(sym: str = "BTC", tf: str = "5m", limit: int = 500, offset: int = 0):
-    """REST candle fetch — used by the frontend for fast symbol switching.
-    Fetches directly from Binance REST so the response is independent of
-    the WebSocket reconnect cycle.
+async def get_history(sym: str = "BTC", tf: str = "5m", before: int = 0, limit: int = 500):
+    """REST candle fetch.
+    - before: endTime in ms for lazy-load pagination (omit for latest)
+    - limit: max candles to return (capped at 500)
     """
-    import httpx
     from engine.state import SYMBOL_MAP, TF_BINANCE
-    sym = sym.upper()
-    if sym not in SYMBOL_MAP:
-        return {"error": f"Unknown symbol {sym}"}
-    s_name = SYMBOL_MAP[sym]["binance"].upper()
-    tf_b   = TF_BINANCE.get(tf, "5m")
-    limit  = min(max(limit, 1), 500)
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit={limit}"
+    import httpx
+    mapping = SYMBOL_MAP.get(sym.upper(), {})
+    s_name  = mapping.get("binance", "btcusdt").upper()
+    tf_b    = TF_BINANCE.get(tf, "5m")
+    limit   = min(max(limit, 1), 500)
+    url     = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit={limit}"
+    if before:
+        url += f"&endTime={before - 1}"
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(url)
             r.raise_for_status()
-            data = r.json()
-        if not isinstance(data, list):
-            return {"candles": [], "liq_bars": [], "delta_bars": []}
         candles = [
             {"t": d[0], "o": float(d[1]), "h": float(d[2]),
              "l": float(d[3]), "c": float(d[4]), "v": float(d[5])}
-            for d in data
+            for d in r.json()
         ]
-        price = candles[-1]["c"] if candles else 0
-        liq_bars   = [{"t": c["t"], "long_usd": 0.0, "short_usd": 0.0} for c in candles]
-        delta_bars = [{"t": c["t"], "delta": 0.0, "cum_delta": 0.0} for c in candles]
-        return {"candles": candles, "liq_bars": liq_bars, "delta_bars": delta_bars, "price": price}
+        return {"candles": candles}
     except Exception as e:
-        log.warning(f"REST history fetch failed for {sym} {tf}: {e}")
-        return {"candles": [], "liq_bars": [], "delta_bars": [], "price": 0}
+        log.warning(f"History fetch failed: {e}")
+        return {"candles": []}
 
 
 @app.get("/api/impact")

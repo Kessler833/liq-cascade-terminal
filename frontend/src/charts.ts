@@ -65,10 +65,11 @@ export function initPriceChart(container: HTMLElement) {
 
 export function updatePriceChart(candles: Candle[]) {
   if (!candleSeries) return;
-  const data: CandlestickData[] = candles.map(c => ({
-    time: (c.t / 1000) as any,
-    open: c.o, high: c.h, low: c.l, close: c.c,
-  }));
+  const seen = new Set<number>();
+  const data: CandlestickData[] = candles
+    .slice().sort((a, b) => a.t - b.t)
+    .filter(c => { const t = c.t / 1000 | 0; if (seen.has(t)) return false; seen.add(t); return true; })
+    .map(c => ({ time: (c.t / 1000) as any, open: c.o, high: c.h, low: c.l, close: c.c }));
   candleSeries.setData(data);
   // markers for signals
   longMarkers = [];
@@ -118,8 +119,14 @@ export function initLiqChart(container: HTMLElement) {
 
 export function updateLiqChart(bars: LiqBar[]) {
   if (!liqLongSeries || !liqShortSeries) return;
-  const longs:  HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: b.long_usd   }));
-  const shorts: HistogramData[] = bars.map(b => ({ time: (b.t / 1000) as any, value: -b.short_usd }));
+  const seenL = new Set<number>(), seenS = new Set<number>();
+  const sorted = bars.slice().sort((a, b) => a.t - b.t);
+  const longs:  HistogramData[] = sorted
+    .filter(b => { const t = b.t / 1000 | 0; if (seenL.has(t)) return false; seenL.add(t); return true; })
+    .map(b => ({ time: (b.t / 1000) as any, value: b.long_usd }));
+  const shorts: HistogramData[] = sorted
+    .filter(b => { const t = b.t / 1000 | 0; if (seenS.has(t)) return false; seenS.add(t); return true; })
+    .map(b => ({ time: (b.t / 1000) as any, value: -b.short_usd }));
   liqLongSeries.setData(longs);
   liqShortSeries.setData(shorts);
 }
@@ -148,15 +155,14 @@ export function initDeltaChart(container: HTMLElement) {
 
 export function updateDeltaChart(bars: DeltaBar[]) {
   if (!deltaHisto || !cumDeltaLine) return;
-  const histo: HistogramData[] = bars.map(b => ({
-    time:  (b.t / 1000) as any,
-    value: b.delta,
-    color: b.delta >= 0 ? DARK.long : DARK.short,
-  }));
-  const cum: LineData[] = bars.map(b => ({
-    time:  (b.t / 1000) as any,
-    value: b.cum_delta,
-  }));
+  const seenH = new Set<number>(), seenC = new Set<number>();
+  const sorted = bars.slice().sort((a, b) => a.t - b.t);
+  const histo: HistogramData[] = sorted
+    .filter(b => { const t = b.t / 1000 | 0; if (seenH.has(t)) return false; seenH.add(t); return true; })
+    .map(b => ({ time: (b.t / 1000) as any, value: b.delta, color: b.delta >= 0 ? DARK.long : DARK.short }));
+  const cum: LineData[] = sorted
+    .filter(b => { const t = b.t / 1000 | 0; if (seenC.has(t)) return false; seenC.add(t); return true; })
+    .map(b => ({ time: (b.t / 1000) as any, value: b.cum_delta }));
   deltaHisto.setData(histo);
   cumDeltaLine.setData(cum);
 }
@@ -172,7 +178,18 @@ export function resizeAll() {
   }
 }
 
-// ---- Viewport helpers ----
+export function onNearLeftEdge(callback: () => void) {
+  if (!priceChart) return;
+  priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range && range.from < 10) callback();
+  });
+}
+
+export function shiftVisibleRange(by: number) {
+  const range = priceChart?.timeScale().getVisibleLogicalRange();
+  if (!range || !priceChart) return;
+  priceChart.timeScale().setVisibleLogicalRange({ from: range.from + by, to: range.to + by });
+}
 
 /** Scrolls price chart to the latest candle; liq + delta follow via sync. */
 export function scrollToLatest() {
@@ -187,6 +204,11 @@ export function getVisibleLogicalRange() {
 /** Sets the visible logical range on the price chart; liq + delta follow via sync. */
 export function setVisibleLogicalRange(range: { from: number; to: number }) {
   priceChart?.timeScale().setVisibleLogicalRange(range);
+}
+
+/** Fits all candles into view (used on symbol/TF change, not on normal history push). */
+export function fitAllCharts() {
+  priceChart?.timeScale().fitContent();
 }
 
 let _syncing = false;

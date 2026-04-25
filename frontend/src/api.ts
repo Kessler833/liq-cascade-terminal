@@ -54,6 +54,10 @@ export const api = {
   setTimeframe: (timeframe: string) => post('/api/timeframe', { timeframe }),
   getState:     ()                  => fetch('/api/state').then(r => r.json()),
   getImpact:    ()                  => fetch('/api/impact').then(r => r.json()),
-  fetchHistory: (sym: string, tf: string, offset = 0) =>
-    fetch(`/api/history?sym=${sym}&tf=${tf}&offset=${offset}&limit=500`).then(r => r.json()),
+  // before: endTime for lazy-load pagination; omit for latest 500 candles
+  fetchHistory: (sym: string, tf: string, before = 0) => {
+    const params = new URLSearchParams({ sym, tf, limit: '500' });
+    if (before) params.set('before', String(before));
+    return fetch(`/api/history?${params}`).then(r => r.json());
+  },
 };
