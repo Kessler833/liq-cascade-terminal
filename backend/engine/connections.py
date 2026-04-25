@@ -50,6 +50,9 @@ class ConnectionManager:
         self._impact = ImpactRecorder(app_state, self._l2, hub.broadcast)
         self._tasks: list[asyncio.Task] = []
         self._dot_status: dict[str, str] = {}
+        # Persistent HTTP client — reused across all Binance REST calls to
+        # avoid paying TLS handshake cost on every history fetch / lazy-load.
+        self._http = httpx.AsyncClient(timeout=10.0)
 
     # expose for REST layer
     @property
@@ -70,6 +73,7 @@ class ConnectionManager:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self._l2.stop()
+        await self._http.aclose()
 
     async def reconnect_all(self):
         for t in self._tasks:
@@ -117,10 +121,9 @@ class ConnectionManager:
         tf_b   = TF_BINANCE[tf]
         url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit=500"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(url)
-                r.raise_for_status()
-                data = r.json()
+            r = await self._http.get(url)
+            r.raise_for_status()
+            data = r.json()
             if not isinstance(data, list):
                 return
             self._s.candles = [
