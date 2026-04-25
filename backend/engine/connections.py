@@ -195,14 +195,36 @@ class ConnectionManager:
         await self._impact.on_liquidation("binance", side, usd, price)
 
     async def _handle_binance_kline(self, k: dict):
-        """Only finalises closed candles. Open-candle updates come from aggTrade."""
-        if not k.get("x", False):
-            return
-        c = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
-             "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
-        self._strategy.update_candle(c, True)
-        self._s.price = c["c"]
-        await self._hub.broadcast({"type": "kline", **c, "closed": True})
+        """Handle kline messages from Binance.
+
+        x=true  (candle close): full authoritative OHLCV — update_candle + broadcast.
+        x=false (candle open):  ONLY used to seed a new bucket that doesn't exist yet.
+                                If the bucket already exists (tick stream is handling it),
+                                we skip — avoiding any mid-candle open corruption.
+        """
+        is_closed = k.get("x", False)
+        c = {
+            "t": k["t"],
+            "o": float(k["o"]),
+            "h": float(k["h"]),
+            "l": float(k["l"]),
+            "c": float(k["c"]),
+            "v": float(k["v"]),
+        }
+
+        if is_closed:
+            # Authoritative close: overwrite everything, broadcast kline to frontend.
+            self._strategy.update_candle(c, True)
+            self._s.price = c["c"]
+            await self._hub.broadcast({"type": "kline", **c, "closed": True})
+        else:
+            # New candle open: only seed the bucket if it doesn't exist yet.
+            # This guarantees update_price_tick finds a bucket to update
+            # without ever corrupting an existing candle's open price.
+            bucket_exists = any(x["t"] == c["t"] for x in self._s.candles)
+            if not bucket_exists:
+                self._strategy.update_candle(c, False)
+                # No frontend broadcast needed — first tick will send a 'tick' message.
 
     async def _handle_binance_trade(self, d: dict):
         price    = float(d.get("p", 0))
