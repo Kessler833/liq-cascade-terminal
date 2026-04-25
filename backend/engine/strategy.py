@@ -107,38 +107,34 @@ class Strategy:
     # Price tick — called by ALL exchange trade handlers
     # ------------------------------------------------------------------
     async def update_price_tick(self, price: float, notional: float, ts_ms: int):
-        """Build live candles from multi-exchange trade ticks.
+        """Update the live candle from a multi-exchange trade tick.
 
-        Every exchange trade handler calls this with its trade price and
-        notional USD volume. We upsert into the current candle bucket and
-        broadcast a throttled 'tick' message to the frontend.
+        CONTRACT:
+        - NEVER creates a new candle. Only update_candle() (kline-close)
+          and the REST history loader create candles with authoritative opens.
+        - NEVER touches the candle open. Only c / h / l / v are written here.
 
-        Args:
-            price:    Trade price in USD.
-            notional: Trade value in USD (size * price * contract_multiplier).
-            ts_ms:    Trade timestamp in milliseconds.
+        If the bucket isn't found (history not yet loaded, or a new candle
+        that kline hasn't opened yet), we silently skip — the correct open
+        will arrive via the Binance REST history or the next kline message.
         """
         if price <= 0 or not self._s.candles:
             return
 
         bt = self._candle_bucket(ts_ms)
 
-        # Find or create the live candle for this bucket
+        # Only update existing candles. Silently skip if bucket not found.
         cb = next((c for c in self._s.candles if c["t"] == bt), None)
         if cb is None:
-            # New candle bucket — shouldn't normally happen mid-session
-            # (kline handles opens), but handle it gracefully
-            cb = {"t": bt, "o": price, "h": price, "l": price, "c": price, "v": notional}
-            self._s.candles.append(cb)
-            self._s.candles.sort(key=lambda x: x["t"])
-        else:
-            cb["c"] = price
-            if price > cb["h"]:
-                cb["h"] = price
-            if price < cb["l"]:
-                cb["l"] = price
-            cb["v"] = cb.get("v", 0.0) + notional
+            return
 
+        # Update close, high, low, volume — open is NEVER touched here.
+        cb["c"] = price
+        if price > cb["h"]:
+            cb["h"] = price
+        if price < cb["l"]:
+            cb["l"] = price
+        cb["v"] = cb.get("v", 0.0) + notional
         self._s.price = price
 
         # Throttled broadcast
