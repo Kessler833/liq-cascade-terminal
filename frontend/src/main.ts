@@ -17,14 +17,18 @@ import {
   updatePriceChart, updateLiqChart, updateDeltaChart,
   resizeAll, setupChartSync,
   onNearLeftEdge, getVisibleLogicalRange, setVisibleLogicalRange,
-  scrollToLatest, fitAllCharts,
+  scrollToLatest,
 } from './charts';
+import { initImpactTab, updateImpact } from './impact';
 
 // ---- Init charts ----
 initPriceChart( document.getElementById('candle-container')!);
 initLiqChart(   document.getElementById('liq-container')!);
 initDeltaChart( document.getElementById('delta-container')!);
 setupChartSync();
+
+// ---- Init impact tab ----
+initImpactTab();
 
 // ---- Lazy-load older candles when user pans to left edge ----
 let _loadingMore = false;
@@ -163,10 +167,8 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
-    // ---- candle_open: new period started, Binance open price is authoritative ----
     case 'candle_open': {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
-      // Only append if not already present (idempotent)
       if (!state.candles.find(x => x.t === c.t)) {
         state.candles.push(c);
         ensureAuxSlot(c.t);
@@ -183,7 +185,6 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
-    // ---- Tick: sub-100ms price update from aggTrade (throttled backend-side) ----
     case 'tick': {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
@@ -192,7 +193,6 @@ onMessage((msg: ServerMsg) => {
       if (idx >= 0) {
         state.candles[idx] = c;
       } else {
-        // candle_open didn't arrive yet or was missed — append as fallback
         state.candles.push(c);
         ensureAuxSlot(c.t);
         if (state.candles.length > 1500) {
@@ -206,7 +206,6 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
-    // ---- Kline: candle-close — finalise with authoritative Binance OHLCV ----
     case 'kline': {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
@@ -332,8 +331,10 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
+    // ---- IMPACT TAB — was previously broken (no render call) ----
     case 'impact_update': {
       state.impact_obs = msg.observations;
+      updateImpact(msg.observations, msg.stats);
       break;
     }
   }
