@@ -1,9 +1,8 @@
 """SQLite persistence layer for liq-cascade-terminal.
 
-Architecture: single asyncio worker queue serialises all writes so SQLite's
-single-writer requirement is never violated under concurrent async coroutines.
+Architecture: single asyncio worker queue serialises all writes.
 Reads run in a thread-pool executor (non-blocking, concurrent).
-The queue is bounded at 5 000 entries to cap memory during cascades.
+Queue is bounded at 5 000 entries to cap memory during cascade bursts.
 
 Public API
 ----------
@@ -44,7 +43,12 @@ async def _db_worker(queue: asyncio.Queue) -> None:
         if job is None:          # poison-pill -> graceful shutdown
             queue.task_done()
             break
-        sql, params, many, fut = job
+        try:
+            sql, params, many, fut = job
+        except (TypeError, ValueError) as exc:
+            log.error("DB worker: malformed job: %s", exc)
+            queue.task_done()
+            continue
         try:
             if many:
                 _conn.executemany(sql, params)
@@ -62,10 +66,12 @@ async def _db_worker(queue: asyncio.Queue) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Internal read helper
+# Internal read helper (runs in thread-pool executor)
 # ---------------------------------------------------------------------------
 
 def _read_sync(sql: str, params: tuple, one: bool) -> Any:
+    if _conn is None:
+        raise RuntimeError("DB not initialised — call init_db() first")
     cur  = _conn.execute(sql, params)
     cols = [d[0] for d in cur.description]
     if one:
@@ -80,19 +86,19 @@ def _read_sync(sql: str, params: tuple, one: bool) -> Any:
 
 async def fetchall(sql: str, params: tuple = ()) -> list[dict]:
     """Return all matching rows as a list of dicts."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()          # FIX: get_running_loop not get_event_loop
     return await loop.run_in_executor(None, _read_sync, sql, params, False)
 
 
 async def fetchone(sql: str, params: tuple = ()) -> dict | None:
     """Return the first matching row as a dict, or None."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()          # FIX: get_running_loop not get_event_loop
     return await loop.run_in_executor(None, _read_sync, sql, params, True)
 
 
 async def execute(sql: str, params: tuple = ()) -> None:
     """Queue a write and await its completion."""
-    fut = asyncio.get_event_loop().create_future()
+    fut = asyncio.get_running_loop().create_future()  # FIX: get_running_loop
     await _queue.put((sql, params, False, fut))
     await fut
 
@@ -109,7 +115,7 @@ def execute_nonblocking(sql: str, params: tuple = ()) -> bool:
 
 async def executemany(sql: str, params_list: list) -> None:
     """Bulk write; awaits completion."""
-    fut = asyncio.get_event_loop().create_future()
+    fut = asyncio.get_running_loop().create_future()  # FIX: get_running_loop
     await _queue.put((sql, params_list, True, fut))
     await fut
 
@@ -119,9 +125,9 @@ async def executemany(sql: str, params_list: list) -> None:
 # ---------------------------------------------------------------------------
 
 def _migrate_sync(conn: sqlite3.Connection) -> None:
-    cur     = conn.execute("PRAGMA table_info(cascade_observations)")
+    cur      = conn.execute("PRAGMA table_info(cascade_observations)")
     existing = {row[1] for row in cur.fetchall()}
-    added   = 0
+    added    = 0
     for col_name, col_type in CASCADE_OBS_REQUIRED_COLUMNS:
         if col_name not in existing:
             # SQLite forbids ADD COLUMN ... NOT NULL without a DEFAULT
@@ -151,7 +157,7 @@ async def init_db() -> None:
     _conn.execute("PRAGMA busy_timeout=10000")
     _conn.execute("PRAGMA synchronous=NORMAL")
     for ddl in ALL_DDL:
-        _conn.execute(ddl)
+        _conn.execute(ddl.strip())   # .strip() removes leading/trailing whitespace
     _conn.commit()
     _migrate_sync(_conn)
     _queue       = asyncio.Queue(maxsize=5_000)

@@ -27,9 +27,9 @@ import db.database as _db                    # DB
 
 log = logging.getLogger("liqterm.impact")
 
-SILENCE_WINDOW_S = 30.0    # new liq within 30s extends current cascade
+SILENCE_WINDOW_S = 30.0
 MIN_LIQ_USD      = 100_000
-TICK_INTERVAL_S  = 0.2     # sample every 200ms while recording
+TICK_INTERVAL_S  = 0.2
 
 _INSERT_SQL = """
 INSERT OR REPLACE INTO cascade_observations (
@@ -151,12 +151,16 @@ class ImpactRecorder:
     # DB: restore completed observations from disk on startup          # DB
     # ------------------------------------------------------------------
     async def load_from_db(self, limit: int = 200) -> None:            # DB
-        rows = await _db.fetchall(
-            "SELECT * FROM cascade_observations "
-            "WHERE label_filled = 1 "
-            "ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        )
+        try:
+            rows = await _db.fetchall(
+                "SELECT * FROM cascade_observations "
+                "WHERE label_filled = 1 "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            )
+        except Exception as exc:
+            log.warning("load_from_db failed (DB not ready?): %s", exc)
+            return
         self.observations = [_db_row_to_obs(r) for r in rows]
         log.info("Loaded %d observations from DB", len(self.observations))
 
@@ -175,7 +179,6 @@ class ImpactRecorder:
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
-            # Extend existing cascade
             active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
@@ -184,7 +187,6 @@ class ImpactRecorder:
         else:
             if active:
                 await self._close_obs(sym)
-            # Open new observation
             res = self._l2.compute_terminal_price(usd_val, self._s.cumulative_delta, side)
             obs = {
                 "id":                    _gen_id(),
@@ -200,13 +202,11 @@ class ImpactRecorder:
                 "total_liq_volume":      usd_val,
                 "liq_remaining":         usd_val,
                 "last_liq_ts":           now,
-                # time series
                 "delta_series":          [],
                 "expected_price_series": [],
                 "price_series":          [],
                 "liq_remaining_series":  [],
                 "cascade_events":        [[now, usd_val, exchange]],
-                # filled at close
                 "final_expected_price":  None,
                 "actual_terminal_price": None,
                 "price_error_pct":       None,
