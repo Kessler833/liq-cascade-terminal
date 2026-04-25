@@ -7,7 +7,7 @@ Exposes:
   GET /api/history         — ?sym=BTC&tf=5m&limit=500[&before=<ms>]  (REST candle fetch)
   GET /api/impact          — impact observations
   POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; reconnect is fire-and-forget)
-  POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe)
+  POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe; no reconnect needed)
   GET /healthz             — liveness probe
 """
 from __future__ import annotations
@@ -226,7 +226,6 @@ async def set_symbol(req: SymbolRequest):
     app_state.reset_stats()
     await hub.broadcast({"type": "symbol_change", "symbol": sym})
     if conn_mgr:
-        # Fire-and-forget so REST response returns immediately
         asyncio.create_task(conn_mgr.reconnect_all())
     return {"ok": True, "symbol": sym}
 
@@ -240,14 +239,12 @@ async def set_timeframe(req: TimeframeRequest):
     if tf == app_state.timeframe:
         return {"ok": True, "timeframe": tf}
     app_state.timeframe = tf
-    app_state.candles   = []
-    app_state.liq_bars  = []
+    app_state.candles    = []
+    app_state.liq_bars   = []
     app_state.delta_bars = []
     await hub.broadcast({"type": "timeframe_change", "timeframe": tf})
     if conn_mgr:
-        # reconnect_all() cancels the old tasks (including the stale @kline_<old_TF>
-        # subscription) and restarts them with the updated app_state.timeframe.
-        # _run_binance will call _fetch_binance_history internally, so no separate
-        # history call is needed here.
-        asyncio.create_task(conn_mgr.reconnect_all())
+        # No WS reconnect needed — the permanent @kline_1m stream keeps running.
+        # on_timeframe_change resets agg state and re-fetches REST history.
+        asyncio.create_task(conn_mgr.on_timeframe_change(app_state.symbol, tf))
     return {"ok": True, "timeframe": tf}

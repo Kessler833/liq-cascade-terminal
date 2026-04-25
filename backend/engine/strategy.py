@@ -33,31 +33,19 @@ class Strategy:
     # Helpers
     # ------------------------------------------------------------------
     def _candle_bucket(self, ts_ms: int) -> int:
-        """Return the candle open-time (ms) that ts_ms falls into.
-
-        Walks state.candles from oldest to newest. Returns the open-time
-        of the candle whose period contains ts_ms.
-
-        Key rule: if ts_ms >= last candle open, always return the last
-        candle's open-time. This handles live trades that arrive slightly
-        after the quantized bucket boundary.
-        """
+        """Return the candle open-time (ms) that ts_ms falls into."""
         candles = self._s.candles
         if not candles:
             from engine.state import TF_MINUTES
             tf_ms = TF_MINUTES[self._s.timeframe] * 60_000
             return (ts_ms // tf_ms) * tf_ms
 
-        # If ts_ms is before the first candle, clamp to first.
         if ts_ms < candles[0]["t"]:
             return candles[0]["t"]
 
-        # If ts_ms is at or after the last candle's open, return last.
-        # This is the common case for live trades.
         if ts_ms >= candles[-1]["t"]:
             return candles[-1]["t"]
 
-        # Binary-search the sorted list for the right bucket.
         lo, hi = 0, len(candles) - 1
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -107,12 +95,7 @@ class Strategy:
             self._s.prev_cumulative_delta = cum
 
     def update_candle(self, c: dict, is_closed: bool):
-        """Create or update a candle. Called by kline handler only.
-
-        On new bucket (x=false, bucket_exists=False): inserts with full
-        Binance OHLCV as the authoritative open.
-        On close (x=True): overwrites existing candle with final OHLCV.
-        """
+        """Create or update a candle. Called by kline handler only."""
         from engine.state import MAX_CANDLES
         existing = next((x for x in self._s.candles if x["t"] == c["t"]), None)
         if existing:
@@ -134,14 +117,10 @@ class Strategy:
         """Update the live candle from a multi-exchange trade tick.
 
         CONTRACT:
-        - NEVER creates a new candle. Only update_candle() (kline) and
-          the REST history loader create candles with authoritative opens.
-        - NEVER touches the candle open. Only c / h / l / v are written.
-        - _candle_bucket() now always returns the last candle for live
-          trades (ts_ms >= candles[-1]["t"]), so the bucket is always
-          found once history is loaded.
-        - Skips candles marked as closed to prevent phantom wicks during
-          the window between kline x=true and the next kline x=false.
+        - NEVER creates a new candle.
+        - NEVER touches the candle open.
+        - Skips candles marked as closed (phantom wick guard).
+        - Rejects ticks deviating >1.5% from last known price (spike guard).
         """
         if price <= 0 or not self._s.candles:
             return
@@ -151,11 +130,16 @@ class Strategy:
         if cb is None:
             return
 
-        # Don't let post-close aggTrades corrupt the just-finished bar.
-        # The tiny window between kline x=true and the next kline x=false
-        # is long enough for several multi-exchange trades to sneak in and
-        # push h/l to wrong values — creating a wick not visible on Binance.
+        # Phantom wick guard: don't update a candle already closed by kline x=true.
         if cb.get("closed"):
+            return
+
+        # Spike guard: reject ticks that deviate more than 1.5% from the last
+        # known price. Guards against stale/erroneous ticks from non-Binance
+        # exchanges. Binance kline x=true always overwrites with authoritative
+        # OHLCV on close, so legitimate fast moves are unaffected.
+        # Nudge threshold to 2% for highly volatile assets (SUI, DOGE) if needed.
+        if self._s.price > 0 and abs(price - self._s.price) / self._s.price > 0.015:
             return
 
         # Update close, high, low, volume — open is NEVER touched.

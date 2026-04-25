@@ -3,6 +3,10 @@
 Each connector runs as an independent asyncio Task with auto-reconnect.
 Normalized events are forwarded to Strategy, which handles state mutation
 and broadcasts to frontend clients via the BroadcastHub.
+
+Binance kline stream is always @kline_1m. _handle_binance_kline aggregates
+1m candles into the user-selected TF locally, so TF changes never require
+a WebSocket reconnect — only agg state reset + REST history refetch.
 """
 from __future__ import annotations
 
@@ -52,7 +56,8 @@ class ConnectionManager:
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
         self._gen: int = 0
-        self._last_candle_open_t: int = 0  # tracks last broadcast candle period
+        self._last_candle_open_t: int = 0   # last broadcast TF-bucket open time
+        self._agg: dict[int, dict] = {}     # tf_bucket → live 1m aggregation state
 
     @property
     def strategy(self) -> "Strategy":
@@ -81,6 +86,17 @@ class ConnectionManager:
         self._s.connected_ws = 0
         self._gen += 1
         await self._connect_all()
+
+    async def on_timeframe_change(self, sym: str, tf: str):
+        """TF changed — no WS reconnect needed.
+
+        Reset aggregation state and re-fetch REST history at the new TF.
+        The permanent @kline_1m stream automatically starts filling the
+        new TF buckets on the next 1m close.
+        """
+        self._last_candle_open_t = 0
+        self._agg.clear()
+        await self._fetch_binance_history(sym, tf)
 
     async def _connect_all(self):
         sym = self._s.symbol
@@ -152,16 +168,18 @@ class ConnectionManager:
     # Binance
     # ------------------------------------------------------------------
     async def _run_binance(self, sym: str, gen: int):
-        from engine.state import SYMBOL_MAP, TF_BINANCE
+        from engine.state import SYMBOL_MAP
         await self._set_dot("binance", "connecting")
-        self._last_candle_open_t = 0  # reset on every new connection
+        self._last_candle_open_t = 0
+        self._agg.clear()
         while True:
             if self._gen != gen:
                 return
             s_name = SYMBOL_MAP[sym]["binance"]
-            tf_b   = TF_BINANCE[self._s.timeframe]
+            # Always subscribe to @kline_1m — we aggregate into the user TF ourselves.
+            # This means TF changes never require a WS reconnect.
             url = (f"wss://fstream.binance.com/stream?streams="
-                   f"{s_name}@forceOrder/{s_name}@kline_{tf_b}/{s_name}@aggTrade")
+                   f"{s_name}@forceOrder/{s_name}@kline_1m/{s_name}@aggTrade")
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
@@ -197,46 +215,86 @@ class ConnectionManager:
         await self._impact.on_liquidation("binance", side, usd, price)
 
     async def _handle_binance_kline(self, k: dict):
-        """Handle kline messages from Binance.
+        """Receives @kline_1m messages; aggregates into the current user-selected TF.
 
-        x=true  (candle CLOSE): authoritative OHLCV written to state + broadcast
-                                as 'kline' so frontend finalises the candle.
-        x=false (candle tick):  broadcast 'candle_open' whenever the period
-                                timestamp changes, tracked via _last_candle_open_t.
-                                This avoids the race where REST history already
-                                contains the new period's candle at a boundary,
-                                which would silently suppress candle_open when
-                                using the old bucket_exists guard.
-                                The frontend deduplicates via the
-                                `!state.candles.find(x => x.t === c.t)` guard.
+        By always consuming 1m data and bucketing it here, TF changes require
+        only an agg-state reset — never a WS reconnect.
+
+        Aggregation fields per TF bucket:
+          o              — open of the first 1m bar in the bucket (never overwritten)
+          h / l / c      — running high / low / close across all 1m bars
+          confirmed_vol  — sum of fully-closed 1m volumes
+          open_1m_vol    — volume of the still-open 1m bar (replaced each tick)
+
+        A TF close is detected when the current 1m bar's end time coincides
+        with the TF boundary: t_1m + 60_000 >= tf_bucket + tf_ms.
         """
-        is_closed = k.get("x", False)
-        c = {
-            "t": int(k["t"]),
-            "o": float(k["o"]),
-            "h": float(k["h"]),
-            "l": float(k["l"]),
-            "c": float(k["c"]),
-            "v": float(k["v"]),
+        from engine.state import TF_MINUTES
+
+        is_1m_closed = k.get("x", False)
+        t_1m  = int(k["t"])
+        o_1m  = float(k["o"])
+        h_1m  = float(k["h"])
+        l_1m  = float(k["l"])
+        c_1m  = float(k["c"])
+        v_1m  = float(k["v"])
+
+        tf_ms     = TF_MINUTES[self._s.timeframe] * 60_000
+        tf_bucket = (t_1m // tf_ms) * tf_ms
+        # True when this 1m bar is the last one in the TF period.
+        is_tf_close = is_1m_closed and (t_1m + 60_000 >= tf_bucket + tf_ms)
+
+        # Build / update aggregation state for this TF bucket.
+        if tf_bucket not in self._agg:
+            self._agg[tf_bucket] = {
+                "o": o_1m, "h": h_1m, "l": l_1m, "c": c_1m,
+                "confirmed_vol": 0.0,
+                "open_1m_vol":   0.0,
+            }
+        agg = self._agg[tf_bucket]
+        agg["h"] = max(agg["h"], h_1m)
+        agg["l"] = min(agg["l"], l_1m)
+        agg["c"] = c_1m
+        if is_1m_closed:
+            agg["confirmed_vol"] += v_1m
+            agg["open_1m_vol"]    = 0.0
+        else:
+            agg["open_1m_vol"] = v_1m
+
+        c_tf = {
+            "t": tf_bucket,
+            "o": agg["o"],
+            "h": agg["h"],
+            "l": agg["l"],
+            "c": agg["c"],
+            "v": agg["confirmed_vol"] + agg["open_1m_vol"],
         }
 
-        if is_closed:
-            # Authoritative close: overwrite OHLCV, mark closed, broadcast.
-            self._strategy.update_candle(c, True)
-            self._s.price = c["c"]
-            await self._hub.broadcast({"type": "kline", **c, "closed": True})
+        if is_tf_close:
+            self._strategy.update_candle(c_tf, True)
+            self._s.price = c_tf["c"]
+            await self._hub.broadcast({"type": "kline", **c_tf, "closed": True})
+            # Prune agg entries older than one full TF period.
+            for old in [b for b in list(self._agg) if b < tf_bucket - tf_ms]:
+                del self._agg[old]
         else:
-            # Track by period timestamp, not by what's in self._s.candles.
-            # self._s.candles may already contain the new period (loaded from
-            # REST history right at a boundary), which would silently suppress
-            # candle_open — leaving the frontend stuck on the previous candle.
-            if c["t"] != self._last_candle_open_t:
-                self._last_candle_open_t = c["t"]
-                self._strategy.update_candle(c, False)
-                # Always broadcast; frontend already deduplicates via the
-                # `!state.candles.find(x => x.t === c.t)` guard in main.ts.
-                await self._hub.broadcast({"type": "candle_open", **c})
-                log.debug(f"New candle opened: t={c['t']} o={c['o']}")
+            if tf_bucket != self._last_candle_open_t:
+                # New TF period just opened.
+                self._last_candle_open_t = tf_bucket
+                self._strategy.update_candle(c_tf, False)
+                await self._hub.broadcast({"type": "candle_open", **c_tf})
+                log.debug(f"New candle opened: t={tf_bucket} o={c_tf['o']}")
+            else:
+                # Intra-period update: patch the live candle in state directly
+                # without creating a new one.
+                existing = next(
+                    (x for x in self._s.candles if x["t"] == tf_bucket), None
+                )
+                if existing and not existing.get("closed"):
+                    existing.update({
+                        "h": c_tf["h"], "l": c_tf["l"],
+                        "c": c_tf["c"], "v": c_tf["v"],
+                    })
 
     async def _handle_binance_trade(self, d: dict):
         price    = float(d.get("p", 0))
