@@ -37,14 +37,11 @@ async function loadMoreCandles() {
   try {
     const before = state.candles[0].t;
     const data = await api.fetchHistory(snapSym, snapTf, before);
-    // Abort if symbol/TF changed while the request was in flight
     if (state.symbol !== snapSym || state.timeframe !== snapTf) return;
     if (!data.candles?.length) return;
-    // Deduplicate against existing candles
     const tSet = new Set(state.candles.map((c: Candle) => c.t));
     const fresh = data.candles.filter((c: any) => !tSet.has(c.t));
     if (!fresh.length) return;
-    // Save viewport position before prepend to avoid snap
     const savedRange = getVisibleLogicalRange();
     state.candles    = [...fresh, ...state.candles];
     state.liq_bars   = [...fresh.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 })), ...state.liq_bars];
@@ -52,7 +49,6 @@ async function loadMoreCandles() {
     updatePriceChart(state.candles);
     updateLiqChart(state.liq_bars);
     updateDeltaChart(state.delta_bars);
-    // Shift viewport by the number of prepended candles
     if (savedRange) {
       setVisibleLogicalRange({
         from: savedRange.from + fresh.length,
@@ -79,12 +75,11 @@ initControls(
   async (sym) => {
     _lastSwitch = Date.now();
     prependLogItem({ msg: `Switching to ${sym}...`, type: 'sys', ts: Date.now() });
-    api.setSymbol(sym);          // fire-and-forget — backend reconnects in background
+    api.setSymbol(sym);
     state.symbol = sym;
-    // Immediately fetch REST history so chart updates within ~1s
     try {
       const data = await api.fetchHistory(sym, state.timeframe);
-      if (state.symbol !== sym) return;  // user switched again before response
+      if (state.symbol !== sym) return;
       if (data.candles?.length) {
         state.candles    = data.candles;
         state.liq_bars   = data.candles.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 }));
@@ -96,9 +91,7 @@ initControls(
         updateCandleLabel(sym, state.timeframe);
         updateStatusBar({ symbol: sym, candles: state.candles.length, lastUpdate: true });
       }
-    } catch (_e) {
-      // Backend will push history via WS history message shortly
-    }
+    } catch (_e) {}
   },
   async (tf) => {
     _lastSwitch = Date.now();
@@ -110,17 +103,25 @@ initControls(
 );
 
 // ---- helpers ----
-
-/**
- * Rebuild liq_bars and delta_bars aligned to a candle array.
- * Used when the server sends empty auxiliary arrays (e.g. right after
- * reset_stats() clears them before the new history is fetched).
- */
 function rebuildAuxBars(candles: Candle[]) {
   return {
     liq_bars:   candles.map(c => ({ t: c.t, long_usd: 0, short_usd: 0 })),
     delta_bars: candles.map(c => ({ t: c.t, delta: 0, cum_delta: 0 })),
   };
+}
+
+/**
+ * Ensure state.liq_bars and state.delta_bars have a slot for timestamp t.
+ * Called on every live kline tick so delta/liq handlers always have somewhere to write.
+ */
+function ensureAuxSlot(t: number) {
+  if (!state.liq_bars.find(b => b.t === t)) {
+    state.liq_bars.push({ t, long_usd: 0, short_usd: 0 });
+  }
+  if (!state.delta_bars.find(b => b.t === t)) {
+    const prevCum = state.delta_bars.at(-1)?.cum_delta ?? 0;
+    state.delta_bars.push({ t, delta: 0, cum_delta: prevCum });
+  }
 }
 
 // ---- Message handler ----
@@ -137,17 +138,8 @@ onMessage((msg: ServerMsg) => {
       state.signal_log   = msg.signal_log;
       state.stats        = msg.stats;
       state.connected_ws = msg.connected_ws;
-      // Rebuild aux bars if server sends empty arrays
-      if (msg.liq_bars?.length) {
-        state.liq_bars = msg.liq_bars;
-      } else {
-        state.liq_bars = rebuildAuxBars(state.candles).liq_bars;
-      }
-      if (msg.delta_bars?.length) {
-        state.delta_bars = msg.delta_bars;
-      } else {
-        state.delta_bars = rebuildAuxBars(state.candles).delta_bars;
-      }
+      state.liq_bars   = msg.liq_bars?.length   ? msg.liq_bars   : rebuildAuxBars(state.candles).liq_bars;
+      state.delta_bars = msg.delta_bars?.length ? msg.delta_bars : rebuildAuxBars(state.candles).delta_bars;
       updatePrice(state.price);
       updatePhase(state.phase);
       updateStats(msg.stats);
@@ -179,24 +171,31 @@ onMessage((msg: ServerMsg) => {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
       updatePrice(msg.c);
-      if (msg.closed) {
-        const idx = state.candles.findIndex(x => x.t === c.t);
-        if (idx >= 0) {
-          state.candles[idx] = c;
-        } else {
-          state.candles.push(c);
-          // Also extend aux bars so delta/liq handlers have a slot to write into
-          state.liq_bars.push({ t: c.t, long_usd: 0, short_usd: 0 });
-          state.delta_bars.push({ t: c.t, delta: 0, cum_delta: state.delta_bars.at(-1)?.cum_delta ?? 0 });
-          if (state.candles.length > 1500) {
-            state.candles.shift();
-            state.liq_bars.shift();
-            state.delta_bars.shift();
-          }
+
+      // Always upsert into state.candles so it stays current for both open and closed candles.
+      // This prevents updateLastCandle from operating on a stale series after a symbol switch.
+      const idx = state.candles.findIndex(x => x.t === c.t);
+      if (idx >= 0) {
+        state.candles[idx] = c;
+      } else {
+        state.candles.push(c);
+        if (state.candles.length > 1500) {
+          state.candles.shift();
+          state.liq_bars.shift();
+          state.delta_bars.shift();
         }
+      }
+
+      // Ensure aux bar slots exist for the current candle timestamp
+      ensureAuxSlot(c.t);
+
+      if (msg.closed) {
         updatePriceChart(state.candles);
         updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       } else {
+        // updateLastCandle is cheap (single update() call) but can be silently
+        // rejected by lightweight-charts if time ordering is violated after
+        // a setData() reset. The charts.ts wrapper handles the fallback.
         updateLastCandle(c);
         updateStatusBar({ lastUpdate: true });
       }
@@ -279,18 +278,8 @@ onMessage((msg: ServerMsg) => {
       state.candles = msg.candles;
       state.price   = msg.price;
       _loadingMore  = false;
-      // If backend sends empty aux arrays (race during reset_stats), rebuild
-      // them from candles so delta/liq handlers always have a valid slot.
-      if (msg.liq_bars?.length) {
-        state.liq_bars = msg.liq_bars;
-      } else {
-        state.liq_bars = rebuildAuxBars(state.candles).liq_bars;
-      }
-      if (msg.delta_bars?.length) {
-        state.delta_bars = msg.delta_bars;
-      } else {
-        state.delta_bars = rebuildAuxBars(state.candles).delta_bars;
-      }
+      state.liq_bars   = msg.liq_bars?.length   ? msg.liq_bars   : rebuildAuxBars(state.candles).liq_bars;
+      state.delta_bars = msg.delta_bars?.length ? msg.delta_bars : rebuildAuxBars(state.candles).delta_bars;
       updatePrice(msg.price);
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
