@@ -6,8 +6,8 @@ Exposes:
   GET /api/candles         — ?sym=BTC&tf=5m  (returns cached candles)
   GET /api/history         — ?sym=BTC&tf=5m&limit=500[&before=<ms>]  (REST candle fetch)
   GET /api/impact          — impact observations
-  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; reconnect is fire-and-forget)
-  POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe; no reconnect needed)
+  POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; no WS reconnect)
+  POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe; no WS reconnect)
   GET /healthz             — liveness probe
 """
 from __future__ import annotations
@@ -226,7 +226,9 @@ async def set_symbol(req: SymbolRequest):
     app_state.reset_stats()
     await hub.broadcast({"type": "symbol_change", "symbol": sym})
     if conn_mgr:
-        asyncio.create_task(conn_mgr.reconnect_all())
+        # No WS reconnect — all 6 connections subscribe to all symbols permanently.
+        # on_symbol_change resets agg state and re-fetches REST history only.
+        asyncio.create_task(conn_mgr.on_symbol_change(sym))
     return {"ok": True, "symbol": sym}
 
 

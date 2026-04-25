@@ -113,15 +113,18 @@ class Strategy:
     # ------------------------------------------------------------------
     # Price tick — called by ALL exchange trade handlers
     # ------------------------------------------------------------------
-    async def update_price_tick(self, price: float, notional: float, ts_ms: int):
+    async def update_price_tick(self, price: float, notional: float, ts_ms: int, event_sym: str):
         """Update the live candle from a multi-exchange trade tick.
 
         CONTRACT:
+        - Only processes ticks for the active symbol.
         - NEVER creates a new candle.
         - NEVER touches the candle open.
         - Skips candles marked as closed (phantom wick guard).
         - Rejects ticks deviating >1.5% from last known price (spike guard).
         """
+        if event_sym != self._s.symbol:
+            return
         if price <= 0 or not self._s.candles:
             return
 
@@ -167,18 +170,24 @@ class Strategy:
     # ------------------------------------------------------------------
     # Delta
     # ------------------------------------------------------------------
-    async def update_delta(self, vol_delta: float, ts_ms: int):
+    async def update_delta(self, vol_delta: float, ts_ms: int, event_sym: str):
         if not math.isfinite(vol_delta) or vol_delta == 0:
             return
         s = self._s
-        s.cumulative_delta += vol_delta
 
+        # Always persist to delta_store for this symbol — survives symbol switches.
         bt1m = (ts_ms // 60_000) * 60_000
-        sb = next((b for b in s.delta_store[s.symbol] if b["t"] == bt1m), None)
+        sb = next((b for b in s.delta_store[event_sym] if b["t"] == bt1m), None)
         if sb is None:
             sb = {"t": bt1m, "delta": 0.0}
-            s.delta_store[s.symbol].append(sb)
+            s.delta_store[event_sym].append(sb)
         sb["delta"] += vol_delta
+
+        # Live display and phase logic only for the active symbol.
+        if event_sym != s.symbol:
+            return
+
+        s.cumulative_delta += vol_delta
 
         bt = self._candle_bucket(ts_ms)
         db = next((b for b in s.delta_bars if b["t"] == bt), None)
@@ -217,16 +226,23 @@ class Strategy:
         usd_val: float,
         price: float,
         symbol: str,
+        event_sym: str,   # canonical symbol key e.g. "BTC"
     ):
         if usd_val < 100:
             return
         s = self._s
         now_ms = int(time.time() * 1000)
 
-        s.liq_store[s.symbol].append({
+        # Always persist under the event's own symbol — captured for all symbols
+        # regardless of which is currently displayed.
+        s.liq_store[event_sym].append({
             "t": now_ms, "exchange": exchange,
             "side": side, "usd_val": usd_val, "price": price,
         })
+
+        # Display updates only for the active symbol.
+        if event_sym != s.symbol:
+            return
 
         s.total_liq += usd_val
         s.total_liq_events += 1
