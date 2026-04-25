@@ -110,9 +110,6 @@ function rebuildAuxBars(candles: Candle[]) {
   };
 }
 
-/**
- * Ensure state.liq_bars and state.delta_bars have a slot for timestamp t.
- */
 function ensureAuxSlot(t: number) {
   if (!state.liq_bars.find(b => b.t === t)) {
     state.liq_bars.push({ t, long_usd: 0, short_usd: 0 });
@@ -166,12 +163,34 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
+    // ---- Tick: sub-100ms price update from aggTrade (throttled backend-side) ----
+    case 'tick': {
+      const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
+      state.price = msg.c;
+      updatePrice(msg.c);
+      const idx = state.candles.findLastIndex((x: Candle) => x.t === c.t);
+      if (idx >= 0) {
+        state.candles[idx] = c;
+      } else {
+        // New open candle started — append and trim
+        state.candles.push(c);
+        ensureAuxSlot(c.t);
+        if (state.candles.length > 1500) {
+          state.candles.shift();
+          state.liq_bars.shift();
+          state.delta_bars.shift();
+        }
+      }
+      updatePriceChart(state.candles);
+      updateStatusBar({ lastUpdate: true });
+      break;
+    }
+
+    // ---- Kline: candle-close only (backend skips open-candle klines now) ----
     case 'kline': {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
       updatePrice(msg.c);
-
-      // Upsert into state.candles (both open and closed ticks)
       const idx = state.candles.findIndex(x => x.t === c.t);
       if (idx >= 0) {
         state.candles[idx] = c;
@@ -183,13 +202,7 @@ onMessage((msg: ServerMsg) => {
           state.delta_bars.shift();
         }
       }
-
       ensureAuxSlot(c.t);
-
-      // Always use updatePriceChart (setData) for every tick, both open and closed.
-      // candleSeries.update() silently no-ops when time <= series cursor after any
-      // setData() reset (e.g. history load, symbol switch), causing the price chart
-      // to freeze for the remainder of the candle period.
       updatePriceChart(state.candles);
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
