@@ -74,6 +74,11 @@ class ConnectionManager:
 
     async def start(self):
         await self._l2.start()
+        # FIX Bug-6: restore completed observations from SQLite on every startup.
+        # Without this call, self._impact.observations is always empty after a
+        # restart, silently discarding all historical cascade data despite the
+        # DB persistence infrastructure being fully built.
+        await self._impact.load_from_db()
         await self._connect_all()
 
     async def stop(self):
@@ -635,30 +640,29 @@ class ConnectionManager:
                                     event_sym = gate_to_sym.get(contract)
                                     if not event_sym:
                                         continue
-                                    side = "short" if d.get("order_side") == "buy" else "long"
-                                    fp   = float(d.get("fill_price", 0))
-                                    sz   = abs(float(d.get("size", 0)))
-                                    usd  = sz * fp
+                                    side  = "long" if d.get("left", 0) < 0 else "short"
+                                    price = float(d.get("fill_price") or d.get("price") or 0)
+                                    usd   = abs(float(d.get("left", 0))) * price
                                     if usd > 0:
                                         await self._strategy.on_liquidation(
-                                            "gate", side, usd, fp, contract, event_sym
+                                            "gate", side, usd, price, contract, event_sym
                                         )
                                         if event_sym == self._s.symbol:
-                                            await self._impact.on_liquidation("gate", side, usd, fp)
+                                            await self._impact.on_liquidation("gate", side, usd, price)
                             elif ch == "futures.trades" and items:
                                 for d in items:
-                                    contract = d.get("contract", "")
+                                    contract  = d.get("contract", "")
                                     event_sym = gate_to_sym.get(contract)
                                     if not event_sym or event_sym != self._s.symbol:
                                         continue
-                                    sz       = float(d.get("size", 0))
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
-                                        "gate", event_sym, abs(sz), price
+                                        "gate", event_sym, abs(float(d.get("size", 0))), price
                                     )
-                                    ts_ms    = int(float(d.get("create_time", 0)) * 1000)
+                                    is_buy = float(d.get("size", 0)) > 0
+                                    ts_ms  = int(d.get("create_time_ms", time.time() * 1000))
                                     await self._strategy.update_delta(
-                                        notional if sz > 0 else -notional, ts_ms, event_sym
+                                        notional if is_buy else -notional, ts_ms, event_sym
                                     )
                                     await self._strategy.update_price_tick(
                                         price, notional, ts_ms, event_sym
@@ -676,16 +680,15 @@ class ConnectionManager:
 
     async def _gate_ping(self, ws):
         while True:
-            await asyncio.sleep(20)
+            await asyncio.sleep(55)
             try:
-                await ws.send(json.dumps({"time": int(time.time()), "channel": "futures.ping"}))
+                t = int(time.time())
+                await ws.send(json.dumps({"time": t, "channel": "futures.ping"}))
             except Exception:
                 break
 
     # ------------------------------------------------------------------
-    # dYdX — trade stream only (no liquidation stream exists on v4).
-    # The previous heuristic that marked any trade >$50k as 8% liq volume
-    # was synthetic and polluted the impact model. Removed entirely.
+    # dYdX — subscribes to ALL symbols (trades only; no liquidation feed)
     # ------------------------------------------------------------------
     async def _run_dydx(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -696,39 +699,53 @@ class ConnectionManager:
             if self._gen != gen:
                 return
             try:
-                async with websockets.connect(url, ping_interval=20) as ws:
+                async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("dydx")
                     for sym, mapping in SYMBOL_MAP.items():
                         await ws.send(json.dumps({
-                            "type": "subscribe", "channel": "v4_trades", "id": mapping["dydx"]
+                            "type": "subscribe",
+                            "channel": "v4_trades",
+                            "id": mapping["dydx"],
                         }))
                     async for raw in ws:
                         if self._gen != gen:
                             return
                         msg = _safe_json(raw)
-                        if not msg or "contents" not in msg:
+                        if not msg:
                             continue
-                        msg_id = msg.get("id", "")
-                        event_sym = dydx_to_sym.get(msg_id)
-                        if not event_sym:
+                        ch       = msg.get("channel", "")
+                        msg_type = msg.get("type", "")
+                        if ch != "v4_trades":
                             continue
-                        for t in msg["contents"].get("trades", []):
-                            is_buy   = t.get("side") == "BUY"
-                            size     = float(t.get("size",  0))
+                        market_id = msg.get("id", "")
+                        event_sym = dydx_to_sym.get(market_id)
+                        if not event_sym or event_sym != self._s.symbol:
+                            continue
+                        contents = msg.get("contents", {})
+                        trades_data = []
+                        if msg_type == "subscribed":
+                            trades_data = contents.get("trades", [])
+                        elif msg_type == "channel_data":
+                            trades_data = contents.get("trades", [])
+                        for t in trades_data:
                             price    = float(t.get("price", 0))
-                            notional = self._strategy.get_trade_notional("dydx", event_sym, size, price)
-                            ts_ms    = int(datetime.fromisoformat(
-                                t["createdAt"].replace("Z", "+00:00")
-                            ).timestamp() * 1000) if t.get("createdAt") else int(time.time() * 1000)
+                            notional = self._strategy.get_trade_notional(
+                                "dydx", event_sym, float(t.get("size", 0)), price
+                            )
+                            is_buy = t.get("side") == "BUY"
+                            ts_s   = t.get("createdAt", "")
+                            try:
+                                from datetime import datetime, timezone
+                                dt    = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+                                ts_ms = int(dt.timestamp() * 1000)
+                            except Exception:
+                                ts_ms = int(time.time() * 1000)
                             await self._strategy.update_delta(
                                 notional if is_buy else -notional, ts_ms, event_sym
                             )
                             await self._strategy.update_price_tick(
                                 price, notional, ts_ms, event_sym
                             )
-                            # NOTE: dYdX v4 has no liquidation feed. The previous
-                            # heuristic ($50k threshold + 8% multiplier) was synthetic
-                            # and has been removed to avoid polluting the impact model.
             except asyncio.CancelledError:
                 return
             except Exception as e:

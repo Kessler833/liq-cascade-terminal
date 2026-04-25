@@ -20,6 +20,12 @@ log = logging.getLogger("liqterm.strategy")
 # Each entry is (timestamp_s, usd_val).
 _LIQ_WINDOW_S = 60.0
 
+# FIX Bug-9: minimum per-event liquidation to record in any store/feed.
+# ImpactRecorder uses MIN_LIQ_USD = 100_000. Using a consistent 1_000 here
+# prevents micro-events ($100-$1000) from polluting feed, stats, liq_bars,
+# and cascade_score with noise that would never reach the impact threshold.
+MIN_LIQ_USD = 1_000
+
 
 class Strategy:
     def __init__(
@@ -240,7 +246,11 @@ class Strategy:
         symbol: str,
         event_sym: str,   # canonical symbol key e.g. "BTC"
     ):
-        if usd_val < 100:
+        # FIX Bug-9: raise minimum from $100 to $1,000.
+        # Events below $1k are exchange-side micro-noise; they would never
+        # reach ImpactRecorder's MIN_LIQ_USD = $100k gate and only pollute
+        # the feed, liq_bars, stats and cascade_score.
+        if usd_val < MIN_LIQ_USD:
             return
         s = self._s
         now_ms = int(time.time() * 1000)
@@ -375,8 +385,12 @@ class Strategy:
             old_phase = s.phase
             s.phase = "waiting"
             s.cascade_score = 0.0
-            s.cumulative_delta = 0.0
-            s.prev_cumulative_delta = 0.0
+            # FIX Bug-7: do NOT zero s.cumulative_delta / s.prev_cumulative_delta here.
+            # These scalars drive the chart's cum_delta line. Zeroing them causes a
+            # visual spike: the live scalar jumps to 0 while delta_bars still holds
+            # the last real cum_delta value, producing a discontinuity on the next
+            # delta broadcast. The next bar's cum_delta will naturally continue from
+            # wherever the market delta is; no artificial reset is needed.
             self._add_log(f"EXIT {old_phase.upper()} @ {s.price:.1f} (delta flip)", "exit")
             if s.candles:
                 s.candles[-1]["signal"] = "exit"
