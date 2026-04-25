@@ -163,6 +163,9 @@ class AppState:
 
     # Connection
     connected_ws: int = 0
+    conn_status: dict = field(default_factory=lambda: {
+        ex: "connecting" for ex in ("binance", "bybit", "okx", "bitget", "gate", "dydx")
+    })
 
     # Series
     candles:    list[dict] = field(default_factory=list)

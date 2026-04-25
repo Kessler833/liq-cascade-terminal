@@ -139,6 +139,7 @@ def _build_snapshot() -> dict:
             "exchanges":        s.exchanges,
         },
         "connected_ws": s.connected_ws,
+        "conn_status":  dict(s.conn_status),
     }
 
 

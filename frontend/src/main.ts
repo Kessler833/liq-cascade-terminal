@@ -50,6 +50,12 @@ onMessage((msg: ServerMsg) => {
       updatePrice(state.price);
       updatePhase(state.phase);
       updateStats(msg.stats);
+      if (msg.conn_status) {
+        for (const [ex, status] of Object.entries(msg.conn_status)) {
+          state.conn_status[ex] = status;
+          updateConnDot(ex, status);
+        }
+      }
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);

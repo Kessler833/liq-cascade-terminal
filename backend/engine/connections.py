@@ -93,6 +93,7 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     async def _set_dot(self, name: str, status: str):
         self._dot_status[name] = status
+        self._s.conn_status[name] = status
         await self._hub.broadcast({"type": "conn_status", "exchange": name, "status": status})
 
     async def _on_connected(self, name: str):

@@ -49,7 +49,8 @@ export interface Stats {
 export type ServerMsg =
   | { type: 'snapshot';        symbol: string; timeframe: string; price: number; phase: Phase;
       candles: Candle[]; liq_bars: LiqBar[]; delta_bars: DeltaBar[];
-      feed: FeedItem[]; signal_log: LogItem[]; stats: Stats; connected_ws: number }
+      feed: FeedItem[]; signal_log: LogItem[]; stats: Stats; connected_ws: number;
+      conn_status?: Record<string, string> }
   | { type: 'kline';           t: number; o: number; h: number; l: number; c: number; v: number; closed: boolean }
   | { type: 'liq';             exchange: string; side: Side; usd_val: number; price: number; symbol: string; ts: number; stats: Stats }
   | { type: 'delta';           cum_delta: number; bar_delta: number; ts: number }
