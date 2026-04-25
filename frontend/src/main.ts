@@ -16,6 +16,7 @@ import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLiqChart, updateDeltaChart,
   updateLastCandle, resizeAll, setupChartSync,
+  scrollToLatest, getVisibleLogicalRange, setVisibleLogicalRange,
 } from './charts';
 
 // ---- Init charts ----
@@ -24,10 +25,36 @@ initLiqChart(   document.getElementById('liq-container')!);
 initDeltaChart( document.getElementById('delta-container')!);
 setupChartSync();
 
+// Track last symbol-switch timestamp to discard stale responses
+let _lastSwitch = 0;
+
 // ---- Init controls ----
 initConnDots();
 initControls(
-  async (sym) => { await api.setSymbol(sym);    state.symbol    = sym; },
+  async (sym) => {
+    _lastSwitch = Date.now();
+    prependLogItem({ msg: `Switching to ${sym}...`, type: 'sys', ts: Date.now() });
+    api.setSymbol(sym);          // fire-and-forget — backend reconnects in background
+    state.symbol = sym;
+    // Immediately fetch REST history so chart updates within ~1s
+    try {
+      const data = await api.fetchHistory(sym, state.timeframe, 0);
+      if (state.symbol !== sym) return;  // user switched again before response
+      if (data.candles?.length) {
+        state.candles    = data.candles;
+        state.liq_bars   = data.candles.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 }));
+        state.delta_bars = data.candles.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 }));
+        updatePriceChart(state.candles);
+        updateLiqChart(state.liq_bars);
+        updateDeltaChart(state.delta_bars);
+        scrollToLatest();
+        updateCandleLabel(sym, state.timeframe);
+        updateStatusBar({ symbol: sym, candles: state.candles.length, lastUpdate: true });
+      }
+    } catch (_e) {
+      // Backend will push history via WS history message shortly
+    }
+  },
   async (tf)  => { await api.setTimeframe(tf);  state.timeframe = tf; },
   SYMBOLS, TIMEFRAMES,
 );
@@ -60,6 +87,7 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      scrollToLatest();
       renderFeed(state.feed);
       renderLog(state.signal_log);
       prependLogItem({ msg: `System ready · ${state.symbol} ${state.timeframe} · ${state.candles.length} candles`, type: 'sys', ts: Date.now() });
@@ -169,6 +197,7 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      scrollToLatest();
       prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
@@ -194,6 +223,20 @@ onMessage((msg: ServerMsg) => {
     }
   }
 });
+
+// ---- Lazy-load more candles (called by scroll handler when near left edge) ----
+export async function loadMoreCandles(fresh: any[]) {
+  const savedRange = getVisibleLogicalRange();
+  updatePriceChart(state.candles);
+  updateLiqChart(state.liq_bars);
+  updateDeltaChart(state.delta_bars);
+  if (savedRange) {
+    setVisibleLogicalRange({
+      from: savedRange.from + fresh.length,
+      to:   savedRange.to  + fresh.length,
+    });
+  }
+}
 
 // ---- Connect ----
 connectWS();

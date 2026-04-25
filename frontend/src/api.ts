@@ -54,4 +54,6 @@ export const api = {
   setTimeframe: (timeframe: string) => post('/api/timeframe', { timeframe }),
   getState:     ()                  => fetch('/api/state').then(r => r.json()),
   getImpact:    ()                  => fetch('/api/impact').then(r => r.json()),
+  fetchHistory: (sym: string, tf: string, offset = 0) =>
+    fetch(`/api/history?sym=${sym}&tf=${tf}&offset=${offset}&limit=500`).then(r => r.json()),
 };

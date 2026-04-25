@@ -1,6 +1,6 @@
 /** Typed client-side mirror of backend AppState + message union types. */
 
-export const SYMBOLS   = ['BTC','ETH','SOL','XRP','DOGE','AVAX','LINK','SUI'] as const;
+export const SYMBOLS   = ['BTC', 'ETH', 'SOL'] as const;
 export const TIMEFRAMES = ['1m','3m','5m','15m','30m','1h','4h','1d']   as const;
 
 export type Symbol    = typeof SYMBOLS[number];

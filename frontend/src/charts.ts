@@ -36,7 +36,7 @@ function baseOpts(container: HTMLElement) {
       horzLines:  { color: DARK.grid },
     },
     crosshair: { mode: CrosshairMode.Normal },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: DARK.border },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: DARK.border, rightOffset: 5 },
     rightPriceScale: { borderColor: DARK.border },
     width:  container.clientWidth,
     height: container.clientHeight || 400,
@@ -170,6 +170,23 @@ export function resizeAll() {
     const el = document.getElementById(id);
     if (chart && el) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
   }
+}
+
+// ---- Viewport helpers ----
+
+/** Scrolls price chart to the latest candle; liq + delta follow via sync. */
+export function scrollToLatest() {
+  priceChart?.timeScale().scrollToRealTime();
+}
+
+/** Returns the current visible logical range of the price chart. */
+export function getVisibleLogicalRange() {
+  return priceChart?.timeScale().getVisibleLogicalRange() ?? null;
+}
+
+/** Sets the visible logical range on the price chart; liq + delta follow via sync. */
+export function setVisibleLogicalRange(range: { from: number; to: number }) {
+  priceChart?.timeScale().setVisibleLogicalRange(range);
 }
 
 let _syncing = false;

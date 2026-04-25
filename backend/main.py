@@ -4,6 +4,7 @@ Exposes:
   WS  /ws                  — single broadcast channel to all frontend clients
   GET /api/state           — snapshot of AppState
   GET /api/candles         — ?sym=BTC&tf=5m  (returns cached candles)
+  GET /api/history         — ?sym=BTC&tf=5m&limit=500  (REST candle fetch for fast symbol switching)
   GET /api/impact          — impact observations
   POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol)
   POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe)
@@ -166,6 +167,42 @@ async def get_candles(sym: str = "BTC", tf: str = "5m"):
     }
 
 
+@app.get("/api/history")
+async def get_history(sym: str = "BTC", tf: str = "5m", limit: int = 500, offset: int = 0):
+    """REST candle fetch — used by the frontend for fast symbol switching.
+    Fetches directly from Binance REST so the response is independent of
+    the WebSocket reconnect cycle.
+    """
+    import httpx
+    from engine.state import SYMBOL_MAP, TF_BINANCE
+    sym = sym.upper()
+    if sym not in SYMBOL_MAP:
+        return {"error": f"Unknown symbol {sym}"}
+    s_name = SYMBOL_MAP[sym]["binance"].upper()
+    tf_b   = TF_BINANCE.get(tf, "5m")
+    limit  = min(max(limit, 1), 500)
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit={limit}"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        if not isinstance(data, list):
+            return {"candles": [], "liq_bars": [], "delta_bars": []}
+        candles = [
+            {"t": d[0], "o": float(d[1]), "h": float(d[2]),
+             "l": float(d[3]), "c": float(d[4]), "v": float(d[5])}
+            for d in data
+        ]
+        price = candles[-1]["c"] if candles else 0
+        liq_bars   = [{"t": c["t"], "long_usd": 0.0, "short_usd": 0.0} for c in candles]
+        delta_bars = [{"t": c["t"], "delta": 0.0, "cum_delta": 0.0} for c in candles]
+        return {"candles": candles, "liq_bars": liq_bars, "delta_bars": delta_bars, "price": price}
+    except Exception as e:
+        log.warning(f"REST history fetch failed for {sym} {tf}: {e}")
+        return {"candles": [], "liq_bars": [], "delta_bars": [], "price": 0}
+
+
 @app.get("/api/impact")
 async def get_impact():
     if conn_mgr is None:
@@ -195,7 +232,8 @@ async def set_symbol(req: SymbolRequest):
     app_state.reset_stats()
     await hub.broadcast({"type": "symbol_change", "symbol": sym})
     if conn_mgr:
-        await conn_mgr.reconnect_all()
+        # Fire-and-forget so REST response returns immediately
+        asyncio.create_task(conn_mgr.reconnect_all())
     return {"ok": True, "symbol": sym}
 
 
