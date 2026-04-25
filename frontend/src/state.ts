@@ -52,6 +52,8 @@ export type ServerMsg =
       feed: FeedItem[]; signal_log: LogItem[]; stats: Stats; connected_ws: number;
       conn_status?: Record<string, string> }
   | { type: 'kline';           t: number; o: number; h: number; l: number; c: number; v: number; closed: boolean }
+  | { type: 'candle_open';     t: number; o: number; h: number; l: number; c: number; v: number }
+  | { type: 'tick';            t: number; o: number; h: number; l: number; c: number; v: number }
   | { type: 'liq';             exchange: string; side: Side; usd_val: number; price: number; symbol: string; ts: number; stats: Stats }
   | { type: 'delta';           cum_delta: number; bar_delta: number; ts: number }
   | { type: 'phase';           phase: Phase; text: string; price: number; cascade_count?: number }
@@ -66,24 +68,40 @@ export type ServerMsg =
 export interface ImpactObs {
   id: string;
   asset: string;
-  timestamp: number;
+  timestamp: number;          // ms
   entry_price: number;
   side: Side;
   exchange: string;
   cascade_size: number;
+  // volumes
   initial_liq_volume: number;
-  initial_expected_price: number;
   total_liq_volume: number;
+  liq_remaining: number;
+  // delta
+  initial_delta: number;
+  // predictions
+  initial_expected_price: number;
   final_expected_price: number | null;
   actual_terminal_price: number | null;
   price_error_pct: number | null;
+  // outcome flags
   cascade_duration_s: number | null;
   absorbed_by_delta: boolean;
   label_filled: 0 | 1;
+  // time series: [timestamp_ms, value][]
+  delta_series:           [number, number][];
+  expected_price_series:  [number, number][];
+  price_series:           [number, number][];
+  liq_remaining_series:   [number, number][];
+  // cascade join events: [timestamp_ms, notional_usd, exchange][]
+  cascade_events:         [number, number, string][];
 }
 
 export interface ImpactStats {
-  total: number; recording: number; avg_err: number | null; absorbed: number;
+  total: number;
+  recording: number;
+  avg_err: number | null;
+  absorbed: number;
 }
 
 // ---- mutable client state ----
