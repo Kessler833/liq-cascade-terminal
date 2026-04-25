@@ -16,6 +16,7 @@ import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLiqChart, updateDeltaChart,
   updateLastCandle, resizeAll, setupChartSync,
+  onNearLeftEdge, shiftVisibleRange, fitAllCharts,
 } from './charts';
 
 // ---- Init charts ----
@@ -23,6 +24,33 @@ initPriceChart( document.getElementById('candle-container')!);
 initLiqChart(   document.getElementById('liq-container')!);
 initDeltaChart( document.getElementById('delta-container')!);
 setupChartSync();
+
+// ---- Lazy-load older candles when user pans to left edge ----
+let _loadingMore = false;
+
+async function loadMoreCandles() {
+  if (_loadingMore || !state.candles.length) return;
+  _loadingMore = true;
+  try {
+    const before = state.candles[0].t;
+    const data = await api.fetchHistory(state.symbol, state.timeframe, before);
+    if (!data.candles?.length) return;
+    const added: number = data.candles.length;
+    state.candles    = [...data.candles, ...state.candles];
+    state.liq_bars   = [...data.candles.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 })), ...state.liq_bars];
+    state.delta_bars = [...data.candles.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 })), ...state.delta_bars];
+    updatePriceChart(state.candles);
+    updateLiqChart(state.liq_bars);
+    updateDeltaChart(state.delta_bars);
+    shiftVisibleRange(added);
+    prependLogItem({ msg: `Loaded ${added} older candles`, type: 'info', ts: Date.now() });
+    updateStatusBar({ candles: state.candles.length });
+  } finally {
+    _loadingMore = false;
+  }
+}
+
+onNearLeftEdge(() => { if (!_loadingMore) loadMoreCandles(); });
 
 // ---- Init controls ----
 initConnDots();
@@ -80,7 +108,7 @@ onMessage((msg: ServerMsg) => {
       updatePrice(msg.c);
       if (msg.closed) {
         state.candles.push(c);
-        if (state.candles.length > 300) state.candles.shift();
+        if (state.candles.length > 1500) state.candles.shift();
         updatePriceChart(state.candles);
         updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       } else {
@@ -169,6 +197,7 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      fitAllCharts();
       prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;

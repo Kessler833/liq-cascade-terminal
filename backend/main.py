@@ -166,6 +166,31 @@ async def get_candles(sym: str = "BTC", tf: str = "5m"):
     }
 
 
+@app.get("/api/history")
+async def get_history(sym: str = "BTC", tf: str = "5m", before: int = 0):
+    from engine.state import SYMBOL_MAP, TF_BINANCE
+    import httpx
+    mapping = SYMBOL_MAP.get(sym, {})
+    s_name  = mapping.get("binance", "btcusdt").upper()
+    tf_b    = TF_BINANCE.get(tf, "5m")
+    url     = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit=300"
+    if before:
+        url += f"&endTime={before - 1}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+        candles = [
+            {"t": d[0], "o": float(d[1]), "h": float(d[2]),
+             "l": float(d[3]), "c": float(d[4]), "v": float(d[5])}
+            for d in r.json()
+        ]
+        return {"candles": candles}
+    except Exception as e:
+        log.warning(f"History fetch failed: {e}")
+        return {"candles": []}
+
+
 @app.get("/api/impact")
 async def get_impact():
     if conn_mgr is None:

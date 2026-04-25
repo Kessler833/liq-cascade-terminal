@@ -138,13 +138,14 @@ body { display: flex; flex-direction: column; }
 .phase-badge.phase-long     { color: var(--green);  border-color: var(--green);  background: rgba(0,230,118,.12); }
 .phase-badge.phase-short    { color: var(--red);    border-color: var(--red);    background: rgba(255,61,90,.12); }
 
-/* ---- Strategy bar ---- */
+/* ---- Strategy bar (terminal tab only, hides on impact) ---- */
 #strategy-bar {
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 16px; height: 36px; min-height: 36px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; height: 44px; min-height: 44px;
   background: var(--surface2); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+#strategy-bar.hidden { display: none; }
 .strat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint); }
 .strat-phase {
   display: flex; align-items: center; gap: 6px;

@@ -172,6 +172,23 @@ export function resizeAll() {
   }
 }
 
+export function onNearLeftEdge(callback: () => void) {
+  if (!priceChart) return;
+  priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range && range.from < 10) callback();
+  });
+}
+
+export function shiftVisibleRange(by: number) {
+  const range = priceChart?.timeScale().getVisibleLogicalRange();
+  if (!range || !priceChart) return;
+  priceChart.timeScale().setVisibleLogicalRange({ from: range.from + by, to: range.to + by });
+}
+
+export function fitAllCharts() {
+  priceChart?.timeScale().fitContent();
+}
+
 let _syncing = false;
 
 export function setupChartSync() {

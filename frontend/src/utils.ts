@@ -9,16 +9,17 @@ export function fmtUSD(v: number, compact = true): string {
 }
 
 export function fmtDelta(v: number): string {
-  const sign = v >= 0 ? '+' : '';
-  if (Math.abs(v) >= 1e9)  return sign + (v / 1e9).toFixed(2) + 'B';
-  if (Math.abs(v) >= 1e6)  return sign + (v / 1e6).toFixed(2) + 'M';
-  if (Math.abs(v) >= 1e3)  return sign + (v / 1e3).toFixed(1) + 'K';
-  return sign + v.toFixed(0);
+  const sign = v >= 0 ? '+' : '-';
+  const abs  = Math.abs(v);
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;
+  return `${sign}$${abs.toFixed(0)}`;
 }
 
 export function fmtPrice(v: number): string {
-  if (v >= 1000) return v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  if (v >= 1000) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
 export function fmtTime(ts: number): string {

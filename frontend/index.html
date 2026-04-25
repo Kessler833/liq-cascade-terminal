@@ -22,13 +22,20 @@
   </div>
   <div class="divider"></div>
 
-  <!-- Screen tabs -->
-  <div class="screen-tabs">
-    <button class="screen-tab active" data-screen="terminal">TERMINAL</button>
-    <button class="screen-tab" data-screen="impact">IMPACT</button>
-  </div>
-  <div class="divider"></div>
+  <!-- Connection indicators — populated by initConnDots() -->
+  <div class="conn-indicators" id="connDots"></div>
 
+  <div class="topbar-right">
+    <!-- Screen tabs -->
+    <div class="screen-tabs">
+      <button class="screen-tab active" data-screen="terminal">TERMINAL</button>
+      <button class="screen-tab" data-screen="impact">IMPACT</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== STRATEGY BAR (terminal tab only) ======================== -->
+<div id="strategy-bar">
   <!-- Symbol buttons — populated by initControls() -->
   <div id="symbolBtns" class="symbol-tabs"></div>
   <div class="divider"></div>
@@ -37,26 +44,13 @@
   <div id="tfBtns" class="tf-tabs"></div>
   <div class="divider"></div>
 
-  <!-- Connection indicators — populated by initConnDots() -->
-  <div class="conn-indicators" id="connDots"></div>
-
-  <div class="topbar-right">
-    <div class="price-display">
-      <div class="price-val" id="priceDisplay">&mdash;</div>
-      <div class="price-change" id="priceChange">&mdash;</div>
-    </div>
-  </div>
-</div>
-
-<!-- ======================== STRATEGY BAR ======================== -->
-<div id="strategy-bar">
-  <div class="strat-label">Strategy Phase</div>
+  <div class="strat-label">Phase</div>
   <div class="strat-phase" id="stratPhase" data-phase="waiting">
     <div class="phase-dot"></div>
     <div class="phase-text" id="phaseText" data-phase="waiting">Waiting for Cascade</div>
   </div>
   <div class="divider"></div>
-  <div class="strat-label">Cascade Strength</div>
+  <div class="strat-label">Cascade</div>
   <div class="cascade-meter">
     <div class="meter-bar"><div class="meter-fill" id="cascadeMeter" style="width:0%"></div></div>
     <span id="cascadeVal" style="font-size:11px;font-variant-numeric:tabular-nums;color:var(--text-muted)">0%</span>
@@ -66,11 +60,14 @@
   <div id="liqRate1m" style="font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-muted)">$0</div>
   <div class="divider"></div>
   <div class="strat-label">Delta</div>
-  <div id="deltaDisplay" style="font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-muted)">0.00</div>
+  <div id="deltaDisplay" style="font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text-muted)">$0.00</div>
   <div class="signal-list">
     <div class="signal cascade" id="sigCascade">CASCADE</div>
     <div class="signal long"    id="sigLong">LONG ENTRY</div>
     <div class="signal short"  id="sigShort">SHORT ENTRY</div>
+  </div>
+  <div class="price-display" style="margin-left:auto;padding-right:4px">
+    <div class="price-val" id="priceDisplay">&mdash;</div>
   </div>
 </div>
 

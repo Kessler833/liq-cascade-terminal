@@ -44,9 +44,11 @@ export function initControls(
       if (screen === 'impact') {
         document.getElementById('terminal-screen')?.classList.add('hidden');
         document.getElementById('impact-screen')?.classList.remove('hidden');
+        document.getElementById('strategy-bar')?.classList.add('hidden');
       } else {
         document.getElementById('terminal-screen')?.classList.remove('hidden');
         document.getElementById('impact-screen')?.classList.add('hidden');
+        document.getElementById('strategy-bar')?.classList.remove('hidden');
       }
     });
   });
