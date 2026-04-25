@@ -1,15 +1,20 @@
-"""Terminal price L2 model — Python port of l2_model.js.
+"""Terminal price L2 impact model.
 
 Fetches order-book snapshot from Binance Futures, estimates the price
-level at which a given liquidation notional would be absorbed, then
-adjusts for current cumulative delta.
+level at which a given liquidation notional would be absorbed, using
+cumulative delta as an additive force modifier per the spec:
+
+    Total Selling Pressure = LIQ_remaining + Δ_current
+
+    - Walk bids  for long  liquidations (forced sell → price down)
+    - Walk asks  for short liquidations (forced buy  → price up)
+    - If Total Pressure ≤ 0, organic counter-flow neutralises the liq;
+      terminal price = current price, absorbed = True.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
-import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -19,18 +24,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.l2")
 
-BOOK_DEPTH    = 20       # levels to fetch
-REFRESH_S     = 5.0      # re-fetch interval
-
-# FIX: DELTA_FACTOR was 0.00001, giving an absorption threshold of ~$30k net
-# cumulative delta — crossed within seconds on any live BTC session, making
-# absorbed_by_delta permanently True. Raised to a value that requires ~$10M
-# net delta to produce a 10% adjustment (realistic for meaningful absorption).
-DELTA_FACTOR  = 0.000_000_01  # delta influence per dollar (was 0.00001)
+BOOK_DEPTH = 50      # levels to fetch (raised from 20 — thin assets blow through 20)
+REFRESH_S  = 5.0     # re-fetch interval
 
 # Per-symbol book exhaustion extrapolation constants.
-# The original 0.5% flat constant was too small for thin-book assets.
-# Real book exhaustion on LINK/SUI/AVAX causes 2-5% moves.
+# Used only when total_pressure exhausts all visible levels.
 EXTRAP_PCT: dict[str, float] = {
     "BTC":  0.5,
     "ETH":  0.8,
@@ -47,12 +45,10 @@ DEFAULT_EXTRAP_PCT = 2.0
 class L2Model:
     def __init__(self, app_state: "AppState"):
         self._s    = app_state
-        self._bids: list[tuple[float, float]] = []  # (price, qty)
-        self._asks: list[tuple[float, float]] = []
+        self._bids: list[tuple[float, float]] = []  # (price, qty) — descending
+        self._asks: list[tuple[float, float]] = []  # (price, qty) — ascending
         self._task: asyncio.Task | None = None
-        # FIX: single shared AsyncClient — avoids creating a new TLS connection
-        # every 5 seconds (the original code used `async with httpx.AsyncClient()`
-        # inside _fetch_book, which defeats connection pooling entirely).
+        # Single shared AsyncClient — avoids recreating a TLS connection every 5s.
         self._http = httpx.AsyncClient(timeout=5.0)
 
     async def start(self):
@@ -79,6 +75,8 @@ class L2Model:
             r = await self._http.get(url)
             r.raise_for_status()
             data = r.json()
+            # bids: highest price first (descending) — what buyers offer
+            # asks: lowest  price first (ascending)  — what sellers offer
             self._bids = [(float(p), float(q)) for p, q in data.get("bids", [])]
             self._asks = [(float(p), float(q)) for p, q in data.get("asks", [])]
         except Exception as e:
@@ -91,27 +89,52 @@ class L2Model:
         cum_delta: float,
         side: str,
     ) -> dict:
-        """
-        Walk the book until `liq_notional` USD is consumed.
+        """Walk the book until total pressure (LIQ + Δ) is consumed.
+
+        Spec algorithm:
+          1. total_pressure = liq_notional + cum_delta
+             - cum_delta > 0: organic flow same direction → amplifies impact
+             - cum_delta < 0: organic counter-flow → cushions impact
+          2. If total_pressure <= 0: liquidation neutralised, no price move.
+          3. Walk the relevant book side, consuming levels until remainder <= 0.
+             - long  liq: price moves DOWN → walk bids (buy orders get eaten)
+             - short liq: price moves UP   → walk asks (sell orders get eaten)
+          4. If visible book exhausted, extrapolate from remaining fraction.
+
         Returns:
             terminal_price  float
             levels_consumed int
-            absorbed        bool   (delta absorbed the pressure)
+            absorbed        bool  (organic flow fully neutralised the liq)
         """
-        mid   = self._s.price or 0.0
-        book  = self._asks if side == "long" else self._bids
-        sym   = self._s.symbol
+        mid = self._s.price or 0.0
+        sym = self._s.symbol
 
-        if not book or mid == 0:
+        if mid == 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False}
 
-        remaining = liq_notional
+        # Bug 1 fix: delta is additive to pressure, not a post-hoc price scaler.
+        total_pressure = liq_notional + cum_delta
+
+        # If counter-flow fully neutralises the liquidation, no price move.
+        if total_pressure <= 0:
+            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": True}
+
+        # Bug 2 fix: correct book side per direction.
+        # Long liq  = forced sell → price moves down → bids (buy orders) are consumed.
+        # Short liq = forced buy  → price moves up   → asks (sell orders) are consumed.
+        book = self._bids if side == "long" else self._asks
+
+        if not book:
+            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False}
+
+        remaining = total_pressure
         terminal  = mid
         consumed  = 0
 
         for price, qty in book:
             level_val = qty * price
             if remaining <= level_val:
+                # This level absorbs the remainder — terminal price stops here.
                 terminal = price
                 consumed += 1
                 break
@@ -119,28 +142,18 @@ class L2Model:
             terminal   = price
             consumed  += 1
         else:
-            # Exhausted visible book — extrapolate using per-symbol constant.
+            # Exhausted all visible levels — extrapolate beyond the book.
             extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
-            extra_pct  = (remaining / liq_notional) * extrap_pct
+            # Scale extrapolation by how much pressure is still unabsorbed.
+            extra_pct  = (remaining / total_pressure) * extrap_pct
             if side == "long":
-                terminal *= (1 + extra_pct / 100)
+                terminal *= (1 - extra_pct / 100)   # price moves further down
             else:
-                terminal *= (1 - extra_pct / 100)
+                terminal *= (1 + extra_pct / 100)   # price moves further up
 
-        # Delta adjustment
-        delta_adj = cum_delta * DELTA_FACTOR
-        if side == "long":
-            terminal *= (1 - max(-0.5, min(0.5, delta_adj)))
-        else:
-            terminal *= (1 + max(-0.5, min(0.5, delta_adj)))
-
-        # FIX: absorbed threshold is now meaningful. With the corrected
-        # DELTA_FACTOR, delta_adj > 0.3 requires ~$30M net cumulative delta,
-        # which represents genuine market-wide absorption pressure.
-        absorbed = abs(delta_adj) > 0.3 and (
-            (side == "long"  and delta_adj > 0) or
-            (side == "short" and delta_adj < 0)
-        )
+        # absorbed: organic counter-flow consumed more than half the liq notional,
+        # meaning the market materially cushioned the impact.
+        absorbed = cum_delta < 0 and abs(cum_delta) > liq_notional * 0.5
 
         return {
             "terminal_price":  round(terminal, 2),
