@@ -219,6 +219,8 @@ class Strategy:
                 "shorts_liq_usd":    s.shorts_liq_usd,
                 "liq_1m_bucket":     s.liq_1m_bucket,
                 "cascade_score":     s.cascade_score,
+                "cascade_count":     s.cascade_count,
+                "cumulative_delta":  s.cumulative_delta,
                 "exchanges":         s.exchanges,
             },
         })

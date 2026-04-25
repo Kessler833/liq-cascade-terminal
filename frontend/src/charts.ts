@@ -201,9 +201,9 @@ export function updateImpactChart(obs: ImpactObs[]) {
 
 export function resizeAll() {
   for (const [chart, id] of [
-    [priceChart,  'priceChart'],
-    [liqChart,    'liqChart'],
-    [deltaChart,  'deltaChart'],
+    [priceChart,  'candle-container'],
+    [liqChart,    'liq-container'],
+    [deltaChart,  'delta-container'],
     [impactChart, 'impactChart'],
   ] as [IChartApi | null, string][]) {
     const el = document.getElementById(id);

@@ -4,6 +4,13 @@ import { fmtUSD, fmtDelta, fmtPrice, fmtTime, el, sizeClass } from './utils';
 
 const EXCHANGES = ['binance','bybit','okx','bitget','gate','dydx'] as const;
 
+const EX_PREFIX: Record<string, string> = {
+  binance: 'bnce', bybit: 'bybt', okx: 'okx',
+  bitget:  'bget', gate:  'gate', dydx: 'dydx',
+};
+
+const CHART_CONTAINERS = ['candle-container', 'liq-container', 'delta-container'];
+
 // ---- Symbol / TF buttons ----
 export function initControls(
   onSymbol: (s: string) => void,
@@ -28,9 +35,14 @@ export function initControls(
     btn.addEventListener('click', () => {
       const tab = (btn as HTMLElement).dataset.tab!;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.chart-container').forEach(c => c.classList.remove('active'));
       btn.classList.add('active');
-      document.getElementById(tab + 'Chart')?.classList.add('active');
+      if (tab === 'impact') {
+        document.getElementById('terminal-screen')?.classList.add('hidden');
+        document.getElementById('impact-screen')?.classList.remove('hidden');
+      } else {
+        document.getElementById('terminal-screen')?.classList.remove('hidden');
+        document.getElementById('impact-screen')?.classList.add('hidden');
+      }
     });
   });
 }
@@ -46,11 +58,36 @@ export function updatePrice(price: number) {
   if (el) el.textContent = fmtPrice(price);
 }
 
+const PHASE_LABELS: Record<string, string> = {
+  waiting:  'Waiting for Cascade',
+  watching: 'Watching for Delta Flip',
+  cascade:  'Cascade Detected!',
+  long:     'Long Entry Signal',
+  short:    'Short Entry Signal',
+};
+
 export function updatePhase(phase: string) {
+  // Top-bar badge
   const badge = document.getElementById('phaseBadge');
-  if (!badge) return;
-  badge.textContent = phase.toUpperCase();
-  badge.className = `phase-badge phase-${phase}`;
+  if (badge) {
+    badge.textContent = phase.toUpperCase();
+    badge.className = `phase-badge phase-${phase}`;
+  }
+  // Strategy bar
+  const stratPhase = document.getElementById('stratPhase');
+  if (stratPhase) stratPhase.dataset.phase = phase;
+  const phaseText = document.getElementById('phaseText');
+  if (phaseText) {
+    phaseText.textContent = PHASE_LABELS[phase] ?? phase;
+    phaseText.dataset.phase = phase;
+  }
+  // Signal badges
+  const sigCascade = document.getElementById('sigCascade');
+  const sigLong    = document.getElementById('sigLong');
+  const sigShort   = document.getElementById('sigShort');
+  if (sigCascade) sigCascade.classList.toggle('active', phase === 'cascade');
+  if (sigLong)    sigLong.classList.toggle('active',    phase === 'long');
+  if (sigShort)   sigShort.classList.toggle('active',   phase === 'short');
 }
 
 // ---- Stats panel ----
@@ -73,24 +110,24 @@ export function updateCascadeMeter(pct: number) {
   const lbl = document.getElementById('cascadePct');
   if (bar) bar.style.width = pct + '%';
   if (lbl) lbl.textContent = Math.round(pct) + '%';
-  if (bar) bar.className = 'meter-bar' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
+  if (bar) bar.className = 'meter-fill' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
 }
 
 function updateExchangeList(stats: Stats) {
-  const wrap = document.getElementById('exchangeList');
-  if (!wrap) return;
-  wrap.innerHTML = '';
+  setText('totalLiqBadge', fmtUSD(stats.total_liq));
   for (const ex of EXCHANGES) {
+    const pfx = EX_PREFIX[ex];
     const d = stats.exchanges[ex as keyof typeof stats.exchanges];
     if (!d) continue;
+    setText(`${pfx}-long`,  fmtUSD(d.long));
+    setText(`${pfx}-short`, fmtUSD(d.short));
     const total = d.long + d.short;
-    if (total === 0) continue;
-    const row = el('div', 'ex-row');
-    row.innerHTML = `
-      <span class="ex-name">${ex}</span>
-      <span class="ex-long">${fmtUSD(d.long)}</span>
-      <span class="ex-short">${fmtUSD(d.short)}</span>`;
-    wrap.appendChild(row);
+    const lp = total > 0 ? (d.long  / total * 100) : 50;
+    const sp = total > 0 ? (d.short / total * 100) : 50;
+    const bl = document.getElementById(`${pfx}-bar-l`);
+    const bs = document.getElementById(`${pfx}-bar-s`);
+    if (bl) bl.style.width = lp + '%';
+    if (bs) bs.style.width = sp + '%';
   }
 }
 
@@ -112,6 +149,28 @@ export function updateConnDot(exchange: string, status: string) {
   if (dot) dot.className = `conn-dot ${status}`;
   const ct = document.getElementById('wsCount');
   if (ct) ct.textContent = state.connected_ws + ' WS';
+}
+
+// ---- Candle label ----
+export function updateCandleLabel(symbol: string, timeframe: string) {
+  const lbl = document.getElementById('candleLabel');
+  if (lbl) lbl.textContent = `${symbol}USDT · ${timeframe} · MULTI-EXCHANGE`;
+}
+
+// ---- Status bar ----
+export function updateStatusBar(opts: {
+  symbol?: string; timeframe?: string; candles?: number;
+  liqEvents?: number; wsCount?: number; lastUpdate?: boolean;
+}) {
+  if (opts.symbol    != null) setText('sbSym',      opts.symbol + 'USDT');
+  if (opts.timeframe != null) setText('sbTf',       opts.timeframe);
+  if (opts.candles   != null) setText('sbCandles',  String(opts.candles));
+  if (opts.liqEvents != null) setText('sbLiqEvents', String(opts.liqEvents));
+  if (opts.wsCount   != null) setText('sbWS',       opts.wsCount + '/6');
+  if (opts.lastUpdate) {
+    const now = new Date();
+    setText('sbLastUpdate', now.toLocaleTimeString());
+  }
 }
 
 // ---- Liq Feed ----

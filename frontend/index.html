@@ -171,15 +171,6 @@
         </div>
       </div>
 
-      <!-- Cascade meter -->
-      <div class="panel-section" style="padding:10px 12px;">
-        <div class="panel-title" style="margin-bottom:6px;">Cascade Meter</div>
-        <div style="height:6px;background:var(--surface3);border-radius:3px;overflow:hidden;">
-          <div class="meter-fill" id="cascadeMeter" style="width:0%"></div>
-        </div>
-        <div style="font-size:10px;color:var(--text-muted);margin-top:4px;text-align:right;font-variant-numeric:tabular-nums;" id="cascadePct">0%</div>
-      </div>
-
       <!-- Live liq feed -->
       <div class="panel-section" style="flex:0 0 auto;">
         <div class="feed-header">
@@ -201,6 +192,7 @@
 
 <!-- ======================== IMPACT SCREEN ======================== -->
 <div id="impact-screen" class="hidden">
+  <div id="impactChart" style="height:180px;background:var(--bg);border-bottom:1px solid var(--border);"></div>
   <div id="imp-statsbar">
     <div class="imp-kpi"><div class="imp-kpi-label">Observations</div><div class="imp-kpi-val accent" id="imp-kpi-total">0</div></div>
     <div class="imp-kpi-sep"></div>

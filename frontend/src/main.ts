@@ -10,6 +10,7 @@ import {
   initControls, initConnDots,
   updatePrice, updatePhase, updateStats, updateCascadeMeter,
   updateConnDot, prependFeedItem, renderFeed, renderLog, prependLogItem,
+  updateCandleLabel, updateStatusBar,
 } from './ui';
 import {
   initPriceChart, initLiqChart, initDeltaChart, initImpactChart,
@@ -18,9 +19,9 @@ import {
 } from './charts';
 
 // ---- Init charts ----
-initPriceChart( document.getElementById('priceChart')!);
-initLiqChart(   document.getElementById('liqChart')!);
-initDeltaChart( document.getElementById('deltaChart')!);
+initPriceChart( document.getElementById('candle-container')!);
+initLiqChart(   document.getElementById('liq-container')!);
+initDeltaChart( document.getElementById('delta-container')!);
 initImpactChart(document.getElementById('impactChart')!);
 
 // ---- Init controls ----
@@ -55,6 +56,14 @@ onMessage((msg: ServerMsg) => {
       updateDeltaChart(state.delta_bars);
       renderFeed(state.feed);
       renderLog(state.signal_log);
+      updateCandleLabel(state.symbol, state.timeframe);
+      updateStatusBar({
+        symbol: state.symbol, timeframe: state.timeframe,
+        candles: state.candles.length,
+        liqEvents: msg.stats.total_liq_events,
+        wsCount: state.connected_ws,
+        lastUpdate: true,
+      });
       break;
     }
 
@@ -66,8 +75,10 @@ onMessage((msg: ServerMsg) => {
         state.candles.push(c);
         if (state.candles.length > 300) state.candles.shift();
         updatePriceChart(state.candles);
+        updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       } else {
         updateLastCandle(c);
+        updateStatusBar({ lastUpdate: true });
       }
       break;
     }
@@ -85,6 +96,7 @@ onMessage((msg: ServerMsg) => {
       };
       state.feed.unshift(item);
       prependFeedItem(item);
+      updateStatusBar({ liqEvents: msg.stats.total_liq_events, lastUpdate: true });
       break;
     }
 
@@ -109,6 +121,9 @@ onMessage((msg: ServerMsg) => {
         state.stats.cascade_count = msg.cascade_count;
         updateStats(state.stats);
       }
+      const logItem = { msg: msg.text, type: msg.phase, ts: Date.now() };
+      state.signal_log.unshift(logItem);
+      prependLogItem(logItem);
       break;
     }
 
@@ -125,6 +140,7 @@ onMessage((msg: ServerMsg) => {
 
     case 'ws_count': {
       state.connected_ws = msg.count;
+      updateStatusBar({ wsCount: msg.count });
       break;
     }
 
@@ -137,16 +153,21 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
     }
 
     case 'symbol_change': {
       state.symbol = msg.symbol;
+      updateCandleLabel(state.symbol, state.timeframe);
+      updateStatusBar({ symbol: state.symbol });
       break;
     }
 
     case 'timeframe_change': {
       state.timeframe = msg.timeframe;
+      updateCandleLabel(state.symbol, state.timeframe);
+      updateStatusBar({ timeframe: state.timeframe });
       break;
     }
 
@@ -162,4 +183,4 @@ onMessage((msg: ServerMsg) => {
 connectWS();
 
 // ---- Resize observer ----
-new ResizeObserver(resizeAll).observe(document.querySelector('.chart-panel') ?? document.body);
+new ResizeObserver(resizeAll).observe(document.getElementById('charts-area') ?? document.body);
