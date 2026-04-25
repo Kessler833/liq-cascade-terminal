@@ -9,6 +9,12 @@ Exposes:
   POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; no WS reconnect)
   POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe; no WS reconnect)
   GET /healthz             — liveness probe
+
+DB changes vs. original (all marked  # DB):
+  - import init_db, close_db from db.database
+  - lifespan: await init_db() before ConnectionManager.start()
+              await conn_mgr.impact.load_from_db() after start()
+              await close_db() after ConnectionManager.stop()
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from engine.state import AppState, DEFAULT_CASCADE_THRESHOLDS, SYMBOL_MAP
+from db.database import init_db, close_db             # DB
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,13 +82,22 @@ conn_mgr  = None   # populated in lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global conn_mgr
+
+    await init_db()                                    # DB: open DB first
+    log.info("Database ready")
+
     from engine.connections import ConnectionManager
     conn_mgr = ConnectionManager(app_state, hub)
     await conn_mgr.start()
+    await conn_mgr.impact.load_from_db()               # DB: restore history
     log.info("ConnectionManager started")
+
     yield
+
     await conn_mgr.stop()
     log.info("ConnectionManager stopped")
+    await close_db()                                   # DB: flush queue & close
+    log.info("Database closed")
 
 
 app = FastAPI(title="Liq Cascade Terminal", lifespan=lifespan)
@@ -227,7 +243,6 @@ async def set_symbol(req: SymbolRequest):
     await hub.broadcast({"type": "symbol_change", "symbol": sym})
     if conn_mgr:
         # No WS reconnect — all 6 connections subscribe to all symbols permanently.
-        # on_symbol_change resets agg state and re-fetches REST history only.
         asyncio.create_task(conn_mgr.on_symbol_change(sym))
     return {"ok": True, "symbol": sym}
 
@@ -246,7 +261,5 @@ async def set_timeframe(req: TimeframeRequest):
     app_state.delta_bars = []
     await hub.broadcast({"type": "timeframe_change", "timeframe": tf})
     if conn_mgr:
-        # No WS reconnect needed — the permanent @kline_1m stream keeps running.
-        # on_timeframe_change resets agg state and re-fetches REST history.
         asyncio.create_task(conn_mgr.on_timeframe_change(app_state.symbol, tf))
     return {"ok": True, "timeframe": tf}

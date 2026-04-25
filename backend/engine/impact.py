@@ -1,11 +1,18 @@
-"""Cascade Impact recorder — Python port of cascade_impact.js.
+"""Cascade Impact recorder — with SQLite persistence.
 
 Records per-cascade observations: entry price, liq volume, predicted vs actual
 terminal price, delta series, price series, and liq-remaining tank.
+
+DB changes vs. original (all marked  # DB):
+  - imports json + db.database
+  - _obs_to_db_row() / _db_row_to_obs()  serialise / deserialise
+  - _persist_obs()    fire-and-forget INSERT OR REPLACE on cascade close
+  - load_from_db()    called by ConnectionManager on startup to restore history
 """
 from __future__ import annotations
 
 import asyncio
+import json                                   # DB
 import logging
 import random
 import string
@@ -16,18 +23,115 @@ if TYPE_CHECKING:
     from engine.state import AppState
     from engine.l2_model import L2Model
 
+import db.database as _db                    # DB
+
 log = logging.getLogger("liqterm.impact")
 
-SILENCE_WINDOW_S  = 30.0    # new liq within 30s extends current cascade
-MIN_LIQ_USD       = 100_000
-TICK_INTERVAL_S   = 0.2     # sample every 200ms while recording
+SILENCE_WINDOW_S = 30.0    # new liq within 30s extends current cascade
+MIN_LIQ_USD      = 100_000
+TICK_INTERVAL_S  = 0.2     # sample every 200ms while recording
+
+_INSERT_SQL = """
+INSERT OR REPLACE INTO cascade_observations (
+    obs_id, asset, timestamp, entry_price, side, exchange,
+    cascade_size, initial_liq_volume, initial_delta, initial_expected_price,
+    total_liq_volume, liq_remaining, last_liq_ts,
+    final_expected_price, actual_terminal_price, price_error_pct,
+    cascade_duration_s, absorbed_by_delta,
+    delta_series, expected_price_series, price_series,
+    liq_remaining_series, cascade_events_json, label_filled
+) VALUES (
+    :obs_id, :asset, :timestamp, :entry_price, :side, :exchange,
+    :cascade_size, :initial_liq_volume, :initial_delta, :initial_expected_price,
+    :total_liq_volume, :liq_remaining, :last_liq_ts,
+    :final_expected_price, :actual_terminal_price, :price_error_pct,
+    :cascade_duration_s, :absorbed_by_delta,
+    :delta_series, :expected_price_series, :price_series,
+    :liq_remaining_series, :cascade_events_json, :label_filled
+)
+"""                                           # DB
 
 
 def _gen_id() -> str:
-    ts = int(time.time() * 1000)
+    ts   = int(time.time() * 1000)
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
     return f"{ts:x}{rand}"
 
+
+# ---------------------------------------------------------------------------
+# DB helpers                                                              # DB
+# ---------------------------------------------------------------------------
+
+def _jdump(val) -> str | None:               # DB
+    return json.dumps(val) if val else None
+
+
+def _jload(val) -> list:                     # DB
+    return json.loads(val) if val else []
+
+
+def _obs_to_db_row(obs: dict) -> dict:       # DB
+    return {
+        "obs_id":                 obs["id"],
+        "asset":                  obs["asset"],
+        "timestamp":              obs["timestamp"],
+        "entry_price":            obs["entry_price"],
+        "side":                   obs["side"],
+        "exchange":               obs["exchange"],
+        "cascade_size":           obs["cascade_size"],
+        "initial_liq_volume":     obs["initial_liq_volume"],
+        "initial_delta":          obs.get("initial_delta"),
+        "initial_expected_price": obs.get("initial_expected_price"),
+        "total_liq_volume":       obs.get("total_liq_volume"),
+        "liq_remaining":          obs.get("liq_remaining", 0.0),
+        "last_liq_ts":            obs.get("last_liq_ts"),
+        "final_expected_price":   obs.get("final_expected_price"),
+        "actual_terminal_price":  obs.get("actual_terminal_price"),
+        "price_error_pct":        obs.get("price_error_pct"),
+        "cascade_duration_s":     obs.get("cascade_duration_s"),
+        "absorbed_by_delta":      int(bool(obs.get("absorbed_by_delta", False))),
+        "delta_series":           _jdump(obs.get("delta_series")),
+        "expected_price_series":  _jdump(obs.get("expected_price_series")),
+        "price_series":           _jdump(obs.get("price_series")),
+        "liq_remaining_series":   _jdump(obs.get("liq_remaining_series")),
+        "cascade_events_json":    _jdump(obs.get("cascade_events")),
+        "label_filled":           obs.get("label_filled", 1),
+    }
+
+
+def _db_row_to_obs(row: dict) -> dict:       # DB
+    """Reconstruct an in-memory observation dict from a DB row."""
+    return {
+        "id":                     row["obs_id"],
+        "asset":                  row["asset"],
+        "timestamp":              row["timestamp"],
+        "entry_price":            row["entry_price"],
+        "side":                   row["side"],
+        "exchange":               row["exchange"],
+        "cascade_size":           row.get("cascade_size", 1),
+        "initial_liq_volume":     row.get("initial_liq_volume", 0.0),
+        "initial_delta":          row.get("initial_delta"),
+        "initial_expected_price": row.get("initial_expected_price"),
+        "total_liq_volume":       row.get("total_liq_volume", 0.0),
+        "liq_remaining":          row.get("liq_remaining", 0.0),
+        "last_liq_ts":            row.get("last_liq_ts") or row["timestamp"],
+        "final_expected_price":   row.get("final_expected_price"),
+        "actual_terminal_price":  row.get("actual_terminal_price"),
+        "price_error_pct":        row.get("price_error_pct"),
+        "cascade_duration_s":     row.get("cascade_duration_s"),
+        "absorbed_by_delta":      bool(row.get("absorbed_by_delta", 0)),
+        "delta_series":           _jload(row.get("delta_series")),
+        "expected_price_series":  _jload(row.get("expected_price_series")),
+        "price_series":           _jload(row.get("price_series")),
+        "liq_remaining_series":   _jload(row.get("liq_remaining_series")),
+        "cascade_events":         _jload(row.get("cascade_events_json")),
+        "label_filled":           row.get("label_filled", 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ImpactRecorder
+# ---------------------------------------------------------------------------
 
 class ImpactRecorder:
     def __init__(
@@ -40,23 +144,42 @@ class ImpactRecorder:
         self._l2 = l2_model
         self._broadcast = broadcast
         self.observations: list[dict] = []   # completed, newest first
-        self.active: dict[str, dict] = {}    # sym → in-progress obs
+        self.active: dict[str, dict] = {}    # sym -> in-progress obs
         self._tick_task: asyncio.Task | None = None
+
+    # ------------------------------------------------------------------
+    # DB: restore completed observations from disk on startup          # DB
+    # ------------------------------------------------------------------
+    async def load_from_db(self, limit: int = 200) -> None:            # DB
+        rows = await _db.fetchall(
+            "SELECT * FROM cascade_observations "
+            "WHERE label_filled = 1 "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        )
+        self.observations = [_db_row_to_obs(r) for r in rows]
+        log.info("Loaded %d observations from DB", len(self.observations))
+
+    # ------------------------------------------------------------------
+    # DB: persist a closed observation (fire-and-forget)               # DB
+    # ------------------------------------------------------------------
+    def _persist_obs(self, obs: dict) -> None:                         # DB
+        _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
     # ------------------------------------------------------------------
     async def on_liquidation(self, exchange: str, side: str, usd_val: float, price: float):
         if usd_val < MIN_LIQ_USD:
             return
-        sym = self._s.symbol
-        now = time.time()
+        sym    = self._s.symbol
+        now    = time.time()
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
             # Extend existing cascade
-            active["cascade_size"] += 1
+            active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
-            active["last_liq_ts"] = now
-            active["liq_remaining"] += usd_val
+            active["last_liq_ts"]       = now
+            active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
         else:
             if active:
@@ -107,7 +230,7 @@ class ImpactRecorder:
         self._tick_task = None
 
     async def _tick_all(self):
-        now = time.time()
+        now      = time.time()
         to_close = []
         for sym, obs in list(self.active.items()):
             obs["liq_remaining"] = max(0, obs["liq_remaining"] * 0.97)
@@ -121,7 +244,7 @@ class ImpactRecorder:
             if res["absorbed"]:
                 obs["absorbed_by_delta"] = True
             silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
-            tank_dry = obs["liq_remaining"] < obs["initial_liq_volume"] * 0.02
+            tank_dry        = obs["liq_remaining"] < obs["initial_liq_volume"] * 0.02
             if silence_expired or tank_dry:
                 to_close.append(sym)
         for sym in to_close:
@@ -144,8 +267,11 @@ class ImpactRecorder:
                 / obs["entry_price"] * 100
             )
         events = obs["cascade_events"]
-        obs["cascade_duration_s"] = (events[-1][0] - events[0][0]) if len(events) > 1 else 0.0
+        obs["cascade_duration_s"] = (
+            (events[-1][0] - events[0][0]) if len(events) > 1 else 0.0
+        )
         self.observations.insert(0, obs)
+        self._persist_obs(obs)           # DB: fire-and-forget write to SQLite
         await self._broadcast_table_update()
 
     # ------------------------------------------------------------------
@@ -158,8 +284,8 @@ class ImpactRecorder:
             return int(t * 1000)
         return {
             **obs,
-            "timestamp": ts(obs["timestamp"]),
-            "last_liq_ts": ts(obs["last_liq_ts"]),
+            "timestamp":             ts(obs["timestamp"]),
+            "last_liq_ts":           ts(obs["last_liq_ts"]),
             "delta_series":          [[ts(t), v] for t, v in obs["delta_series"]],
             "expected_price_series": [[ts(t), v] for t, v in obs["expected_price_series"]],
             "price_series":          [[ts(t), v] for t, v in obs["price_series"]],
@@ -170,9 +296,9 @@ class ImpactRecorder:
     async def _broadcast_table_update(self):
         all_obs = self.get_all()
         await self._broadcast({
-            "type": "impact_update",
+            "type":         "impact_update",
             "observations": [self.to_serialisable(o) for o in all_obs[:50]],
-            "stats": self._calc_stats(all_obs),
+            "stats":        self._calc_stats(all_obs),
         })
 
     def _calc_stats(self, all_obs: list[dict]) -> dict:
