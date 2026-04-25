@@ -26,22 +26,19 @@ class Strategy:
         self._s = app_state
         self._l2 = l2_model
         self._broadcast = broadcast
+        # Throttle: last time we sent a 'tick' broadcast (ms)
+        self._last_tick_ms: int = 0
+        self._tick_throttle_ms: int = 100
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     def _candle_bucket(self, ts_ms: int) -> int:
-        """Return the candle open-time (ms) that ts_ms falls into.
-
-        Snaps to actual candle timestamps so liq/delta bars always
-        align with the candles rendered by lightweight-charts.
-        Falls back to pure TF-interval bucketing if no candles exist.
-        """
+        """Return the candle open-time (ms) that ts_ms falls into."""
         from engine.state import TF_MINUTES
         tf_ms = TF_MINUTES[self._s.timeframe] * 60_000
         candles = self._s.candles
         if candles:
-            # Find the last candle whose open is <= ts_ms
             bt = candles[0]["t"]
             for c in candles:
                 if c["t"] <= ts_ms:
@@ -49,14 +46,12 @@ class Strategy:
                 else:
                     break
             return bt
-        # No candles yet — fall back to interval math
         return (ts_ms // tf_ms) * tf_ms
 
     # ------------------------------------------------------------------
     # Candle helpers
     # ------------------------------------------------------------------
     def apply_liq_store(self, sym: str, tf: str):
-        """Re-bucket persisted liq events into the current TF (mirrors applyLiqStore)."""
         from engine.state import TF_MINUTES
         tf_ms = TF_MINUTES[tf] * 60_000
         for ev in self._s.liq_store.get(sym, []):
@@ -72,7 +67,6 @@ class Strategy:
                 lb["short_usd"] += ev["usd_val"]
 
     def apply_delta_store(self, sym: str, tf: str):
-        """Re-bucket persisted 1m delta buckets into current TF."""
         from engine.state import TF_MINUTES
         tf_ms = TF_MINUTES[tf] * 60_000
         grouped: dict[int, float] = {}
@@ -94,6 +88,7 @@ class Strategy:
             self._s.prev_cumulative_delta = cum
 
     def update_candle(self, c: dict, is_closed: bool):
+        """Called only on kline-close to finalise a candle with authoritative OHLCV."""
         from engine.state import MAX_CANDLES
         existing = next((x for x in self._s.candles if x["t"] == c["t"]), None)
         if existing:
@@ -109,6 +104,58 @@ class Strategy:
             self._s.delta_bars.append({"t": c["t"], "delta": 0.0, "cum_delta": self._s.cumulative_delta})
 
     # ------------------------------------------------------------------
+    # Price tick — called by ALL exchange trade handlers
+    # ------------------------------------------------------------------
+    async def update_price_tick(self, price: float, notional: float, ts_ms: int):
+        """Build live candles from multi-exchange trade ticks.
+
+        Every exchange trade handler calls this with its trade price and
+        notional USD volume. We upsert into the current candle bucket and
+        broadcast a throttled 'tick' message to the frontend.
+
+        Args:
+            price:    Trade price in USD.
+            notional: Trade value in USD (size * price * contract_multiplier).
+            ts_ms:    Trade timestamp in milliseconds.
+        """
+        if price <= 0 or not self._s.candles:
+            return
+
+        bt = self._candle_bucket(ts_ms)
+
+        # Find or create the live candle for this bucket
+        cb = next((c for c in self._s.candles if c["t"] == bt), None)
+        if cb is None:
+            # New candle bucket — shouldn't normally happen mid-session
+            # (kline handles opens), but handle it gracefully
+            cb = {"t": bt, "o": price, "h": price, "l": price, "c": price, "v": notional}
+            self._s.candles.append(cb)
+            self._s.candles.sort(key=lambda x: x["t"])
+        else:
+            cb["c"] = price
+            if price > cb["h"]:
+                cb["h"] = price
+            if price < cb["l"]:
+                cb["l"] = price
+            cb["v"] = cb.get("v", 0.0) + notional
+
+        self._s.price = price
+
+        # Throttled broadcast
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._last_tick_ms >= self._tick_throttle_ms:
+            self._last_tick_ms = now_ms
+            await self._broadcast({
+                "type": "tick",
+                "t":    cb["t"],
+                "o":    cb["o"],
+                "h":    cb["h"],
+                "l":    cb["l"],
+                "c":    price,
+                "v":    cb["v"],
+            })
+
+    # ------------------------------------------------------------------
     # Delta
     # ------------------------------------------------------------------
     async def update_delta(self, vol_delta: float, ts_ms: int):
@@ -117,7 +164,6 @@ class Strategy:
         s = self._s
         s.cumulative_delta += vol_delta
 
-        # Persist at 1m resolution
         bt1m = (ts_ms // 60_000) * 60_000
         sb = next((b for b in s.delta_store[s.symbol] if b["t"] == bt1m), None)
         if sb is None:
@@ -125,7 +171,6 @@ class Strategy:
             s.delta_store[s.symbol].append(sb)
         sb["delta"] += vol_delta
 
-        # Snap to candle open time
         bt = self._candle_bucket(ts_ms)
         db = next((b for b in s.delta_bars if b["t"] == bt), None)
         if db is None:
@@ -135,7 +180,6 @@ class Strategy:
         db["delta"] += vol_delta
         db["cum_delta"] = s.cumulative_delta
 
-        # Phase transition checks
         prev, cur = s.prev_cumulative_delta, s.cumulative_delta
         if s.phase == "watching":
             if (prev < 0 and cur > 0):
@@ -170,13 +214,11 @@ class Strategy:
         s = self._s
         now_ms = int(time.time() * 1000)
 
-        # Persist
         s.liq_store[s.symbol].append({
             "t": now_ms, "exchange": exchange,
             "side": side, "usd_val": usd_val, "price": price,
         })
 
-        # Aggregate stats
         s.total_liq += usd_val
         s.total_liq_events += 1
         if side == "long":
@@ -187,7 +229,6 @@ class Strategy:
             s.shorts_liq_events += 1
         s.exchanges[exchange][side] += usd_val
 
-        # Snap to candle open time so liq bars align with price chart
         bt = self._candle_bucket(now_ms)
         lb = next((b for b in s.liq_bars if b["t"] == bt), None)
         if lb is None:
@@ -198,17 +239,14 @@ class Strategy:
         else:
             lb["short_usd"] += usd_val
 
-        # 1m rate bucket
         now_s = time.time()
         if now_s - s.liq_1m_timestamp > 60:
             s.liq_1m_bucket = 0.0
             s.liq_1m_timestamp = now_s
         s.liq_1m_bucket += usd_val
 
-        # Cascade detection
         await self._detect_cascade(usd_val)
 
-        # Feed item
         sym_short = (symbol
             .replace("USDT", "")
             .replace("-USDT-SWAP", "")
@@ -224,7 +262,6 @@ class Strategy:
         if len(s.feed) > 80:
             s.feed.pop()
 
-        # Broadcast
         await self._broadcast({
             "type": "liq",
             "exchange": exchange,
@@ -270,7 +307,6 @@ class Strategy:
                 "price": s.price,
                 "cascade_count": s.cascade_count,
             })
-            # Auto-transition to watching after 30s
             asyncio.create_task(self._cascade_timeout())
 
         pct = min(100, (s.cascade_score / T) * 100)

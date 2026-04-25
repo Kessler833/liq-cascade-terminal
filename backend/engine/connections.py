@@ -27,10 +27,6 @@ log = logging.getLogger("liqterm.connections")
 
 RECONNECT_DELAY = 3.0
 
-# Throttle tick broadcasts: send at most one 'tick' per this many ms.
-# aggTrade fires hundreds of times/sec; we don't need every one on the chart.
-TICK_THROTTLE_MS = 100
-
 
 def _safe_json(raw: str) -> dict | None:
     try:
@@ -56,8 +52,6 @@ class ConnectionManager:
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
         self._gen: int = 0
-        # Throttle: last time we broadcast a 'tick' message (ms)
-        self._last_tick_ms: int = 0
 
     @property
     def strategy(self) -> "Strategy":
@@ -201,13 +195,9 @@ class ConnectionManager:
         await self._impact.on_liquidation("binance", side, usd, price)
 
     async def _handle_binance_kline(self, k: dict):
-        """Only used for candle-close events now. Open-candle price updates
-        come from aggTrade ticks which are far more frequent."""
-        closed = k.get("x", False)
-        if not closed:
-            # Open candle — aggTrade already keeps the chart current
+        """Only finalises closed candles. Open-candle updates come from aggTrade."""
+        if not k.get("x", False):
             return
-        # Candle closed: finalize OHLCV and open the next bar
         c = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
              "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
         self._strategy.update_candle(c, True)
@@ -215,39 +205,14 @@ class ConnectionManager:
         await self._hub.broadcast({"type": "kline", **c, "closed": True})
 
     async def _handle_binance_trade(self, d: dict):
-        """aggTrade: update delta AND drive the live price candle."""
-        price  = float(d.get("p", 0))
-        qty    = float(d.get("q", 0))
-        is_buy = not d.get("m", True)
-        vol    = qty * price
-
-        # Delta (unchanged)
-        await self._strategy.update_delta(vol if is_buy else -vol, int(d.get("T", 0)))
-
-        # Update current candle OHLC in-place
-        if price > 0 and self._s.candles:
-            last = self._s.candles[-1]
-            last["c"] = price
-            if price > last["h"]:
-                last["h"] = price
-            if price < last["l"]:
-                last["l"] = price
-            last["v"] = last.get("v", 0) + vol
-            self._s.price = price
-
-            # Throttle: broadcast at most once per TICK_THROTTLE_MS
-            now_ms = int(time.time() * 1000)
-            if now_ms - self._last_tick_ms >= TICK_THROTTLE_MS:
-                self._last_tick_ms = now_ms
-                await self._hub.broadcast({
-                    "type": "tick",
-                    "t":    last["t"],
-                    "o":    last["o"],
-                    "h":    last["h"],
-                    "l":    last["l"],
-                    "c":    price,
-                    "v":    last["v"],
-                })
+        price    = float(d.get("p", 0))
+        qty      = float(d.get("q", 0))
+        is_buy   = not d.get("m", True)
+        notional = qty * price
+        # Delta
+        await self._strategy.update_delta(notional if is_buy else -notional, int(d.get("T", 0)))
+        # Price candle (throttled tick broadcast lives in Strategy)
+        await self._strategy.update_price_tick(price, notional, int(d.get("T", 0)))
 
     # ------------------------------------------------------------------
     # Bybit
@@ -286,8 +251,11 @@ class ConnectionManager:
                                     await self._impact.on_liquidation("bybit", side, usd, price)
                             elif topic.startswith("publicTrade"):
                                 for d in items:
-                                    notional = self._strategy.get_trade_notional("bybit", sym, float(d.get("v", 0)), float(d.get("p", 0)))
-                                    await self._strategy.update_delta(notional if d.get("S") == "Buy" else -notional, int(d.get("T", 0)))
+                                    price    = float(d.get("p", 0))
+                                    notional = self._strategy.get_trade_notional("bybit", sym, float(d.get("v", 0)), price)
+                                    is_buy   = d.get("S") == "Buy"
+                                    await self._strategy.update_delta(notional if is_buy else -notional, int(d.get("T", 0)))
+                                    await self._strategy.update_price_tick(price, notional, int(d.get("T", 0)))
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -354,8 +322,11 @@ class ConnectionManager:
                                             await self._impact.on_liquidation("okx", side, usd, bk_px)
                             elif ch == "trades" and data:
                                 for d in data:
-                                    notional = self._strategy.get_trade_notional("okx", sym, float(d.get("sz", 0)), float(d.get("px", 0)))
-                                    await self._strategy.update_delta(notional if d.get("side") == "buy" else -notional, int(d.get("ts", 0)))
+                                    price    = float(d.get("px", 0))
+                                    notional = self._strategy.get_trade_notional("okx", sym, float(d.get("sz", 0)), price)
+                                    is_buy   = d.get("side") == "buy"
+                                    await self._strategy.update_delta(notional if is_buy else -notional, int(d.get("ts", 0)))
+                                    await self._strategy.update_price_tick(price, notional, int(d.get("ts", 0)))
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -420,8 +391,11 @@ class ConnectionManager:
                                         await self._impact.on_liquidation("bitget", side, usd, fp)
                             elif ch == "trade" and items:
                                 for d in items:
-                                    notional = self._strategy.get_trade_notional("bitget", sym, float(d.get("sz", 0)), float(d.get("price", 0)))
-                                    await self._strategy.update_delta(notional if d.get("side") == "buy" else -notional, int(d.get("ts", 0)))
+                                    price    = float(d.get("price", 0))
+                                    notional = self._strategy.get_trade_notional("bitget", sym, float(d.get("sz", 0)), price)
+                                    is_buy   = d.get("side") == "buy"
+                                    await self._strategy.update_delta(notional if is_buy else -notional, int(d.get("ts", 0)))
+                                    await self._strategy.update_price_tick(price, notional, int(d.get("ts", 0)))
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -480,11 +454,12 @@ class ConnectionManager:
                                         await self._impact.on_liquidation("gate", side, usd, fp)
                             elif ch == "futures.trades" and items:
                                 for d in items:
-                                    sz   = float(d.get("size", 0))
-                                    fp   = float(d.get("price", 0))
-                                    notional = self._strategy.get_trade_notional("gate", sym, abs(sz), fp)
-                                    ts_ms = int(float(d.get("create_time", 0)) * 1000)
+                                    sz       = float(d.get("size", 0))
+                                    price    = float(d.get("price", 0))
+                                    notional = self._strategy.get_trade_notional("gate", sym, abs(sz), price)
+                                    ts_ms    = int(float(d.get("create_time", 0)) * 1000)
                                     await self._strategy.update_delta(notional if sz > 0 else -notional, ts_ms)
+                                    await self._strategy.update_price_tick(price, notional, ts_ms)
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -529,16 +504,16 @@ class ConnectionManager:
                             is_buy   = t.get("side") == "BUY"
                             size     = float(t.get("size",  0))
                             price    = float(t.get("price", 0))
-                            vol      = size * price
                             notional = self._strategy.get_trade_notional("dydx", sym, size, price)
                             ts_ms    = int(datetime.fromisoformat(
                                 t["createdAt"].replace("Z", "+00:00")
                             ).timestamp() * 1000) if t.get("createdAt") else int(time.time() * 1000)
                             await self._strategy.update_delta(notional if is_buy else -notional, ts_ms)
-                            if vol > 50_000:
+                            await self._strategy.update_price_tick(price, notional, ts_ms)
+                            if notional > 50_000:
                                 liq_side = "short" if is_buy else "long"
-                                await self._strategy.on_liquidation("dydx", liq_side, vol * 0.08, price, s_name)
-                                await self._impact.on_liquidation("dydx", liq_side, vol * 0.08, price)
+                                await self._strategy.on_liquidation("dydx", liq_side, notional * 0.08, price, s_name)
+                                await self._impact.on_liquidation("dydx", liq_side, notional * 0.08, price)
             except asyncio.CancelledError:
                 return
             except Exception as e:
