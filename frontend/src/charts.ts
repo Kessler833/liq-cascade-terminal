@@ -48,6 +48,11 @@ let priceChart:  IChartApi | null = null;
 let candleSeries: ISeriesApi<'Candlestick'> | null = null;
 let longMarkers:  { time: number; position: string; color: string; shape: string; text: string }[] = [];
 
+// Keep a reference to the full candle array so updateLastCandle can
+// fall back to a full setData if lightweight-charts rejects the update()
+// due to time-ordering constraints (common after symbol switches).
+let _lastCandleData: CandlestickData[] = [];
+
 export function initPriceChart(container: HTMLElement) {
   priceChart = createChart(container, baseOpts(container));
   candleSeries = priceChart.addCandlestickSeries({
@@ -70,6 +75,7 @@ export function updatePriceChart(candles: Candle[]) {
     .slice().sort((a, b) => a.t - b.t)
     .filter(c => { const t = c.t / 1000 | 0; if (seen.has(t)) return false; seen.add(t); return true; })
     .map(c => ({ time: (c.t / 1000) as any, open: c.o, high: c.h, low: c.l, close: c.c }));
+  _lastCandleData = data;  // keep reference for updateLastCandle fallback
   candleSeries.setData(data);
   // markers for signals
   longMarkers = [];
@@ -91,10 +97,27 @@ export function updatePriceChart(candles: Candle[]) {
 
 export function updateLastCandle(c: Candle) {
   if (!candleSeries) return;
-  candleSeries.update({
+  const tick = {
     time:  (c.t / 1000) as any,
     open:  c.o, high: c.h, low: c.l, close: c.c,
-  });
+  };
+  try {
+    candleSeries.update(tick);
+  } catch {
+    // lightweight-charts threw a time-ordering error — the series cursor
+    // was reset by a recent setData() call (e.g. after symbol switch) and
+    // the incoming time is being rejected. Fall back to a full setData
+    // using the last known data merged with this tick.
+    if (_lastCandleData.length) {
+      const idx = _lastCandleData.findIndex(d => d.time === tick.time);
+      if (idx >= 0) {
+        _lastCandleData[idx] = tick;
+      } else {
+        _lastCandleData.push(tick);
+      }
+      candleSeries.setData(_lastCandleData);
+    }
+  }
 }
 
 // ---- Liq bar chart ----
