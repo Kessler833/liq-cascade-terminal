@@ -242,10 +242,12 @@ async def set_timeframe(req: TimeframeRequest):
     app_state.timeframe = tf
     app_state.candles   = []
     app_state.liq_bars  = []
-    app_state.delta_bars= []
+    app_state.delta_bars = []
     await hub.broadcast({"type": "timeframe_change", "timeframe": tf})
     if conn_mgr:
-        asyncio.create_task(
-            conn_mgr._fetch_binance_history(app_state.symbol, tf)
-        )
+        # reconnect_all() cancels the old tasks (including the stale @kline_<old_TF>
+        # subscription) and restarts them with the updated app_state.timeframe.
+        # _run_binance will call _fetch_binance_history internally, so no separate
+        # history call is needed here.
+        asyncio.create_task(conn_mgr.reconnect_all())
     return {"ok": True, "timeframe": tf}
