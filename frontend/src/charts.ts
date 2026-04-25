@@ -1,9 +1,6 @@
 /**
  * Chart rendering — lightweight-charts v4.
- * Four panels: price (candlestick + liq markers + signals),
- *              liq bars (grouped bar),
- *              delta (histogram + cumulative line),
- *              impact scatter.
+ * Three panels: price (candlestick), liq bars (histogram), delta (histogram + line).
  */
 import {
   createChart, ColorType, CrosshairMode,
@@ -32,8 +29,8 @@ function baseOpts(container: HTMLElement) {
       textColor:  DARK.text,
     },
     grid: {
-      vertLines:  { color: DARK.grid },
-      horzLines:  { color: DARK.grid },
+      vertLines: { color: DARK.grid },
+      horzLines: { color: DARK.grid },
     },
     crosshair: { mode: CrosshairMode.Normal },
     timeScale: { timeVisible: true, secondsVisible: false, borderColor: DARK.border, rightOffset: 5 },
@@ -43,25 +40,19 @@ function baseOpts(container: HTMLElement) {
   };
 }
 
-// ---- Price chart ----
-let priceChart:  IChartApi | null = null;
+// ---- Price chart --------------------------------------------------------
+let priceChart:   IChartApi | null = null;
 let candleSeries: ISeriesApi<'Candlestick'> | null = null;
-let longMarkers:  { time: number; position: string; color: string; shape: string; text: string }[] = [];
-
-// Keep a reference to the full candle array so updateLastCandle can
-// fall back to a full setData if lightweight-charts rejects the update()
-// due to time-ordering constraints (common after symbol switches).
-let _lastCandleData: CandlestickData[] = [];
 
 export function initPriceChart(container: HTMLElement) {
   priceChart = createChart(container, baseOpts(container));
   candleSeries = priceChart.addCandlestickSeries({
-    upColor:          DARK.long,
-    downColor:        DARK.short,
-    borderUpColor:    DARK.long,
-    borderDownColor:  DARK.short,
-    wickUpColor:      DARK.long,
-    wickDownColor:    DARK.short,
+    upColor:         DARK.long,
+    downColor:       DARK.short,
+    borderUpColor:   DARK.long,
+    borderDownColor: DARK.short,
+    wickUpColor:     DARK.long,
+    wickDownColor:   DARK.short,
   });
   window.addEventListener('resize', () => {
     priceChart?.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -73,55 +64,37 @@ export function updatePriceChart(candles: Candle[]) {
   const seen = new Set<number>();
   const data: CandlestickData[] = candles
     .slice().sort((a, b) => a.t - b.t)
-    .filter(c => { const t = c.t / 1000 | 0; if (seen.has(t)) return false; seen.add(t); return true; })
+    .filter(c => {
+      const t = (c.t / 1000) | 0;
+      if (seen.has(t)) return false;
+      seen.add(t);
+      return true;
+    })
     .map(c => ({ time: (c.t / 1000) as any, open: c.o, high: c.h, low: c.l, close: c.c }));
-  _lastCandleData = data;  // keep reference for updateLastCandle fallback
+
   candleSeries.setData(data);
-  // markers for signals
-  longMarkers = [];
+
+  // Signal markers
+  const markers: any[] = [];
   for (const c of candles) {
     if (!c.signal) continue;
-    const col = c.signal === 'long'  ? DARK.long  :
-                c.signal === 'short' ? DARK.short :
-                c.signal === 'cascade' ? DARK.orange : DARK.text;
+    const col   = c.signal === 'long'    ? DARK.long
+                : c.signal === 'short'   ? DARK.short
+                : c.signal === 'cascade' ? DARK.orange
+                : DARK.text;
     const shape = (c.signal === 'long' || c.signal === 'cascade') ? 'arrowUp' : 'arrowDown';
-    longMarkers.push({
-      time: (c.t / 1000) as any,
+    markers.push({
+      time:     (c.t / 1000) as any,
       position: shape === 'arrowUp' ? 'belowBar' : 'aboveBar',
       color: col, shape,
-      text: c.signal.toUpperCase(),
+      text:  c.signal.toUpperCase(),
     });
   }
-  (candleSeries as any).setMarkers(longMarkers);
+  (candleSeries as any).setMarkers(markers);
 }
 
-export function updateLastCandle(c: Candle) {
-  if (!candleSeries) return;
-  const tick = {
-    time:  (c.t / 1000) as any,
-    open:  c.o, high: c.h, low: c.l, close: c.c,
-  };
-  try {
-    candleSeries.update(tick);
-  } catch {
-    // lightweight-charts threw a time-ordering error — the series cursor
-    // was reset by a recent setData() call (e.g. after symbol switch) and
-    // the incoming time is being rejected. Fall back to a full setData
-    // using the last known data merged with this tick.
-    if (_lastCandleData.length) {
-      const idx = _lastCandleData.findIndex(d => d.time === tick.time);
-      if (idx >= 0) {
-        _lastCandleData[idx] = tick;
-      } else {
-        _lastCandleData.push(tick);
-      }
-      candleSeries.setData(_lastCandleData);
-    }
-  }
-}
-
-// ---- Liq bar chart ----
-let liqChart: IChartApi | null = null;
+// ---- Liq chart ----------------------------------------------------------
+let liqChart:       IChartApi | null = null;
 let liqLongSeries:  ISeriesApi<'Histogram'> | null = null;
 let liqShortSeries: ISeriesApi<'Histogram'> | null = null;
 
@@ -144,17 +117,17 @@ export function updateLiqChart(bars: LiqBar[]) {
   if (!liqLongSeries || !liqShortSeries) return;
   const seenL = new Set<number>(), seenS = new Set<number>();
   const sorted = bars.slice().sort((a, b) => a.t - b.t);
-  const longs:  HistogramData[] = sorted
-    .filter(b => { const t = b.t / 1000 | 0; if (seenL.has(t)) return false; seenL.add(t); return true; })
+  const longs: HistogramData[] = sorted
+    .filter(b => { const t = (b.t / 1000) | 0; if (seenL.has(t)) return false; seenL.add(t); return true; })
     .map(b => ({ time: (b.t / 1000) as any, value: b.long_usd }));
   const shorts: HistogramData[] = sorted
-    .filter(b => { const t = b.t / 1000 | 0; if (seenS.has(t)) return false; seenS.add(t); return true; })
+    .filter(b => { const t = (b.t / 1000) | 0; if (seenS.has(t)) return false; seenS.add(t); return true; })
     .map(b => ({ time: (b.t / 1000) as any, value: -b.short_usd }));
   liqLongSeries.setData(longs);
   liqShortSeries.setData(shorts);
 }
 
-// ---- Delta chart ----
+// ---- Delta chart --------------------------------------------------------
 let deltaChart:   IChartApi | null = null;
 let deltaHisto:   ISeriesApi<'Histogram'> | null = null;
 let cumDeltaLine: ISeriesApi<'Line'>      | null = null;
@@ -166,10 +139,10 @@ export function initDeltaChart(container: HTMLElement) {
     priceFormat:  { type: 'volume' },
   });
   cumDeltaLine = deltaChart.addLineSeries({
-    color:       DARK.gold,
-    lineWidth:   2,
-    priceScaleId:'cumd',
-    priceFormat: { type: 'volume' },
+    color:        DARK.gold,
+    lineWidth:    2,
+    priceScaleId: 'cumd',
+    priceFormat:  { type: 'volume' },
   });
   window.addEventListener('resize', () => {
     deltaChart?.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -181,15 +154,16 @@ export function updateDeltaChart(bars: DeltaBar[]) {
   const seenH = new Set<number>(), seenC = new Set<number>();
   const sorted = bars.slice().sort((a, b) => a.t - b.t);
   const histo: HistogramData[] = sorted
-    .filter(b => { const t = b.t / 1000 | 0; if (seenH.has(t)) return false; seenH.add(t); return true; })
+    .filter(b => { const t = (b.t / 1000) | 0; if (seenH.has(t)) return false; seenH.add(t); return true; })
     .map(b => ({ time: (b.t / 1000) as any, value: b.delta, color: b.delta >= 0 ? DARK.long : DARK.short }));
   const cum: LineData[] = sorted
-    .filter(b => { const t = b.t / 1000 | 0; if (seenC.has(t)) return false; seenC.add(t); return true; })
+    .filter(b => { const t = (b.t / 1000) | 0; if (seenC.has(t)) return false; seenC.add(t); return true; })
     .map(b => ({ time: (b.t / 1000) as any, value: b.cum_delta }));
   deltaHisto.setData(histo);
   cumDeltaLine.setData(cum);
 }
 
+// ---- Shared utilities ---------------------------------------------------
 export function resizeAll() {
   for (const [chart, id] of [
     [priceChart, 'candle-container'],
@@ -224,12 +198,12 @@ export function getVisibleLogicalRange() {
   return priceChart?.timeScale().getVisibleLogicalRange() ?? null;
 }
 
-/** Sets the visible logical range on the price chart; liq + delta follow via sync. */
+/** Sets the visible logical range; liq + delta follow via sync. */
 export function setVisibleLogicalRange(range: { from: number; to: number }) {
   priceChart?.timeScale().setVisibleLogicalRange(range);
 }
 
-/** Fits all candles into view (used on symbol/TF change, not on normal history push). */
+/** Fits all candles into view. */
 export function fitAllCharts() {
   priceChart?.timeScale().fitContent();
 }
