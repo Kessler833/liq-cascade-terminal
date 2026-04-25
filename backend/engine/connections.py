@@ -1,4 +1,4 @@
-"""All 6 exchange WebSocket connectors — Python port of websocket.js.
+"""All 6 exchange WebSocket connectors.
 
 Each connector runs as an independent asyncio Task with auto-reconnect.
 Normalized events are forwarded to Strategy, which handles state mutation
@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.connections")
 
-RECONNECT_DELAY = 3.0  # seconds before reconnect attempt
+RECONNECT_DELAY = 3.0
+
+# Throttle tick broadcasts: send at most one 'tick' per this many ms.
+# aggTrade fires hundreds of times/sec; we don't need every one on the chart.
+TICK_THROTTLE_MS = 100
 
 
 def _safe_json(raw: str) -> dict | None:
@@ -50,16 +54,11 @@ class ConnectionManager:
         self._impact = ImpactRecorder(app_state, self._l2, hub.broadcast)
         self._tasks: list[asyncio.Task] = []
         self._dot_status: dict[str, str] = {}
-        # Persistent HTTP client — reused across all Binance REST calls to
-        # avoid paying TLS handshake cost on every history fetch / lazy-load.
         self._http = httpx.AsyncClient(timeout=10.0)
-        # Generation counter: incremented on every reconnect_all().
-        # Each WS task captures its generation at start and exits immediately
-        # if self._gen has moved on, preventing stale tasks from writing into
-        # state that belongs to a newer symbol/tf context.
         self._gen: int = 0
+        # Throttle: last time we broadcast a 'tick' message (ms)
+        self._last_tick_ms: int = 0
 
-    # expose for REST layer
     @property
     def strategy(self) -> "Strategy":
         return self._strategy
@@ -68,7 +67,6 @@ class ConnectionManager:
     def impact(self) -> "ImpactRecorder":
         return self._impact
 
-    # ------------------------------------------------------------------
     async def start(self):
         await self._l2.start()
         await self._connect_all()
@@ -86,7 +84,7 @@ class ConnectionManager:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self._s.connected_ws = 0
-        self._gen += 1          # invalidate all previously spawned tasks
+        self._gen += 1
         await self._connect_all()
 
     async def _connect_all(self):
@@ -100,7 +98,6 @@ class ConnectionManager:
             asyncio.create_task(self._run_dydx(sym, self._gen),    name="dydx"),
         ]
 
-    # ------------------------------------------------------------------
     async def _set_dot(self, name: str, status: str):
         self._dot_status[name] = status
         self._s.conn_status[name] = status
@@ -119,12 +116,9 @@ class ConnectionManager:
         await self._hub.broadcast({"type": "ws_count", "count": self._s.connected_ws})
 
     # ------------------------------------------------------------------
-    # History fetch (Binance REST)
+    # History fetch
     # ------------------------------------------------------------------
     async def _fetch_binance_history(self, sym: str, tf: str, gen: int = -1):
-        """Fetch 500 candles from Binance REST and broadcast as 'history'.
-        If gen is provided, aborts before broadcasting if generation has moved on.
-        """
         from engine.state import SYMBOL_MAP, TF_BINANCE
         s_name = SYMBOL_MAP[sym]["binance"].upper()
         tf_b   = TF_BINANCE[tf]
@@ -133,7 +127,6 @@ class ConnectionManager:
             r = await self._http.get(url)
             r.raise_for_status()
             data = r.json()
-            # Stale-response guard: abort if a newer reconnect has already run
             if gen >= 0 and self._gen != gen:
                 return
             if not isinstance(data, list):
@@ -150,11 +143,11 @@ class ConnectionManager:
             if self._s.candles:
                 self._s.price = self._s.candles[-1]["c"]
             await self._hub.broadcast({
-                "type":    "history",
-                "candles": self._s.candles,
-                "liq_bars": self._s.liq_bars,
-                "delta_bars": self._s.delta_bars,
-                "price":   self._s.price,
+                "type":      "history",
+                "candles":   self._s.candles,
+                "liq_bars":  self._s.liq_bars,
+                "delta_bars":self._s.delta_bars,
+                "price":     self._s.price,
             })
             log.info(f"Loaded {len(self._s.candles)} candles for {sym} {tf}")
         except Exception as e:
@@ -167,7 +160,6 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP, TF_BINANCE
         await self._set_dot("binance", "connecting")
         while True:
-            # Stale-generation exit: stop immediately if reconnect_all() fired again
             if self._gen != gen:
                 return
             s_name = SYMBOL_MAP[sym]["binance"]
@@ -177,7 +169,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
-                    log.debug("Binance: connected")
                     asyncio.create_task(self._fetch_binance_history(sym, self._s.timeframe, gen))
                     async for raw in ws:
                         if self._gen != gen:
@@ -210,16 +201,53 @@ class ConnectionManager:
         await self._impact.on_liquidation("binance", side, usd, price)
 
     async def _handle_binance_kline(self, k: dict):
+        """Only used for candle-close events now. Open-candle price updates
+        come from aggTrade ticks which are far more frequent."""
+        closed = k.get("x", False)
+        if not closed:
+            # Open candle — aggTrade already keeps the chart current
+            return
+        # Candle closed: finalize OHLCV and open the next bar
         c = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
              "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
-        self._strategy.update_candle(c, k.get("x", False))
+        self._strategy.update_candle(c, True)
         self._s.price = c["c"]
-        await self._hub.broadcast({"type": "kline", **c, "closed": k.get("x", False)})
+        await self._hub.broadcast({"type": "kline", **c, "closed": True})
 
     async def _handle_binance_trade(self, d: dict):
+        """aggTrade: update delta AND drive the live price candle."""
+        price  = float(d.get("p", 0))
+        qty    = float(d.get("q", 0))
         is_buy = not d.get("m", True)
-        vol    = float(d.get("q", 0)) * float(d.get("p", 0))
+        vol    = qty * price
+
+        # Delta (unchanged)
         await self._strategy.update_delta(vol if is_buy else -vol, int(d.get("T", 0)))
+
+        # Update current candle OHLC in-place
+        if price > 0 and self._s.candles:
+            last = self._s.candles[-1]
+            last["c"] = price
+            if price > last["h"]:
+                last["h"] = price
+            if price < last["l"]:
+                last["l"] = price
+            last["v"] = last.get("v", 0) + vol
+            self._s.price = price
+
+            # Throttle: broadcast at most once per TICK_THROTTLE_MS
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_tick_ms >= TICK_THROTTLE_MS:
+                self._last_tick_ms = now_ms
+                await self._hub.broadcast({
+                    "type": "tick",
+                    "t":    last["t"],
+                    "o":    last["o"],
+                    "h":    last["h"],
+                    "l":    last["l"],
+                    "c":    price,
+                    "v":    last["v"],
+                })
 
     # ------------------------------------------------------------------
     # Bybit
@@ -235,7 +263,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bybit")
-                    log.debug("Bybit: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         f"allLiquidation.{s_name}", f"publicTrade.{s_name}"
                     ]}))
@@ -294,7 +321,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("okx")
-                    log.debug("OKX: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         {"channel": "liquidation-orders", "instType": "SWAP"},
                         {"channel": "trades", "instId": s_name},
@@ -363,7 +389,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bitget")
-                    log.debug("Bitget: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         {"instType": "USDT-FUTURES", "channel": "liquidation-order", "instId": s_name},
                         {"instType": "USDT-FUTURES", "channel": "trade",             "instId": s_name},
@@ -430,7 +455,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("gate")
-                    log.debug("Gate: connected")
                     t = int(time.time())
                     await ws.send(json.dumps({"time": t, "channel": "futures.liquidates", "event": "subscribe", "payload": [s_name]}))
                     await ws.send(json.dumps({"time": t, "channel": "futures.trades",     "event": "subscribe", "payload": [s_name]}))
@@ -494,7 +518,6 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("dydx")
-                    log.debug("dYdX: connected")
                     await ws.send(json.dumps({"type": "subscribe", "channel": "v4_trades", "id": s_name}))
                     async for raw in ws:
                         if self._gen != gen:
@@ -512,7 +535,6 @@ class ConnectionManager:
                                 t["createdAt"].replace("Z", "+00:00")
                             ).timestamp() * 1000) if t.get("createdAt") else int(time.time() * 1000)
                             await self._strategy.update_delta(notional if is_buy else -notional, ts_ms)
-                            # dYdX heuristic: large trade ≈ 8% liquidation
                             if vol > 50_000:
                                 liq_side = "short" if is_buy else "long"
                                 await self._strategy.on_liquidation("dydx", liq_side, vol * 0.08, price, s_name)
