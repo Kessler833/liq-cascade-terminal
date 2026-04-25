@@ -122,9 +122,9 @@ def _build_snapshot() -> dict:
         "timeframe": s.timeframe,
         "price":     s.price,
         "phase":     s.phase,
-        "candles":   s.candles[-100:],
-        "liq_bars":  s.liq_bars[-100:],
-        "delta_bars":s.delta_bars[-100:],
+        "candles":   s.candles,
+        "liq_bars":  s.liq_bars,
+        "delta_bars":s.delta_bars,
         "feed":      s.feed[:40],
         "signal_log":s.signal_log[:30],
         "stats": {

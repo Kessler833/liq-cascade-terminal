@@ -31,19 +31,26 @@ let _loadingMore = false;
 async function loadMoreCandles() {
   if (_loadingMore || !state.candles.length) return;
   _loadingMore = true;
+  const snapSym = state.symbol;
+  const snapTf  = state.timeframe;
   try {
     const before = state.candles[0].t;
-    const data = await api.fetchHistory(state.symbol, state.timeframe, before);
+    const data = await api.fetchHistory(snapSym, snapTf, before);
+    // Abort if symbol/TF changed while the request was in flight
+    if (state.symbol !== snapSym || state.timeframe !== snapTf) return;
     if (!data.candles?.length) return;
-    const added: number = data.candles.length;
-    state.candles    = [...data.candles, ...state.candles];
-    state.liq_bars   = [...data.candles.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 })), ...state.liq_bars];
-    state.delta_bars = [...data.candles.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 })), ...state.delta_bars];
+    // Deduplicate against existing candles
+    const tSet = new Set(state.candles.map((c: Candle) => c.t));
+    const fresh = data.candles.filter((c: any) => !tSet.has(c.t));
+    if (!fresh.length) return;
+    state.candles    = [...fresh, ...state.candles];
+    state.liq_bars   = [...fresh.map((c: any) => ({ t: c.t, long_usd: 0, short_usd: 0 })), ...state.liq_bars];
+    state.delta_bars = [...fresh.map((c: any) => ({ t: c.t, delta: 0, cum_delta: 0 })), ...state.delta_bars];
     updatePriceChart(state.candles);
     updateLiqChart(state.liq_bars);
     updateDeltaChart(state.delta_bars);
-    shiftVisibleRange(added);
-    prependLogItem({ msg: `Loaded ${added} older candles`, type: 'info', ts: Date.now() });
+    shiftVisibleRange(fresh.length);
+    prependLogItem({ msg: `Loaded ${fresh.length} older candles`, type: 'info', ts: Date.now() });
     updateStatusBar({ candles: state.candles.length });
   } finally {
     _loadingMore = false;
@@ -52,11 +59,27 @@ async function loadMoreCandles() {
 
 onNearLeftEdge(() => { if (!_loadingMore) loadMoreCandles(); });
 
+// ---- Suppress connection log noise during intentional reconnects ----
+// Set when user switches symbol/TF; cleared 8s later or when 6/6 connects.
+let _lastSwitch = 0;
+const QUIET_MS = 8000;
+function inQuietPeriod() { return Date.now() - _lastSwitch < QUIET_MS; }
+
 // ---- Init controls ----
 initConnDots();
 initControls(
-  async (sym) => { await api.setSymbol(sym);    state.symbol    = sym; },
-  async (tf)  => { await api.setTimeframe(tf);  state.timeframe = tf; },
+  async (sym) => {
+    _lastSwitch = Date.now();
+    prependLogItem({ msg: `Switching to ${sym}...`, type: 'sys', ts: Date.now() });
+    await api.setSymbol(sym);
+    state.symbol = sym;
+  },
+  async (tf) => {
+    _lastSwitch = Date.now();
+    prependLogItem({ msg: `Switching to ${tf} timeframe...`, type: 'sys', ts: Date.now() });
+    await api.setTimeframe(tf);
+    state.timeframe = tf;
+  },
   SYMBOLS, TIMEFRAMES,
 );
 
@@ -107,8 +130,14 @@ onMessage((msg: ServerMsg) => {
       state.price = msg.c;
       updatePrice(msg.c);
       if (msg.closed) {
-        state.candles.push(c);
-        if (state.candles.length > 1500) state.candles.shift();
+        // Replace if the candle already exists (prevents duplicates at boundary)
+        const idx = state.candles.findIndex(x => x.t === c.t);
+        if (idx >= 0) {
+          state.candles[idx] = c;
+        } else {
+          state.candles.push(c);
+          if (state.candles.length > 1500) state.candles.shift();
+        }
         updatePriceChart(state.candles);
         updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       } else {
@@ -170,21 +199,25 @@ onMessage((msg: ServerMsg) => {
     case 'conn_status': {
       state.conn_status[msg.exchange] = msg.status;
       updateConnDot(msg.exchange, msg.status);
-      const connText = msg.status === 'connected' ? 'connected'
-                     : msg.status === 'error'     ? 'error — reconnecting in 3s'
-                     :                              'connecting...';
-      prependLogItem({
-        msg: `${msg.exchange.toUpperCase()}: ${connText}`,
-        type: msg.status === 'error' ? 'error' : msg.status === 'connected' ? 'conn' : 'warn',
-        ts: Date.now(),
-      });
+      // Only log errors outside the quiet window; skip "connecting" entirely
+      if (msg.status === 'error' && !inQuietPeriod()) {
+        prependLogItem({
+          msg: `${msg.exchange.toUpperCase()}: error — reconnecting`,
+          type: 'error',
+          ts: Date.now(),
+        });
+      }
       break;
     }
 
     case 'ws_count': {
       state.connected_ws = msg.count;
       updateStatusBar({ wsCount: msg.count });
-      prependLogItem({ msg: `WebSocket feeds: ${msg.count}/6 connected`, type: 'sys', ts: Date.now() });
+      // Log once when all connections are up after a switch
+      if (msg.count === 6 && inQuietPeriod()) {
+        _lastSwitch = 0; // clear quiet period early
+        prependLogItem({ msg: 'All 6 exchange feeds connected', type: 'conn', ts: Date.now() });
+      }
       break;
     }
 
@@ -193,6 +226,7 @@ onMessage((msg: ServerMsg) => {
       state.liq_bars   = msg.liq_bars;
       state.delta_bars = msg.delta_bars;
       state.price      = msg.price;
+      _loadingMore     = false; // cancel any in-flight lazy-load
       updatePrice(msg.price);
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);

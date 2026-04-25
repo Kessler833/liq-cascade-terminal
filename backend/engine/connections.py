@@ -115,7 +115,7 @@ class ConnectionManager:
         from engine.state import SYMBOL_MAP, TF_BINANCE
         s_name = SYMBOL_MAP[sym]["binance"].upper()
         tf_b   = TF_BINANCE[tf]
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit=300"
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s_name}&interval={tf_b}&limit=500"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(url)
@@ -159,7 +159,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
-                    log.info("Binance: connected")
+                    log.debug("Binance: connected")
                     asyncio.create_task(self._fetch_binance_history(sym, self._s.timeframe))
                     async for raw in ws:
                         if self._s.symbol != sym:
@@ -213,7 +213,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bybit")
-                    log.info("Bybit: connected")
+                    log.debug("Bybit: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         f"allLiquidation.{s_name}", f"publicTrade.{s_name}"
                     ]}))
@@ -268,7 +268,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("okx")
-                    log.info("OKX: connected")
+                    log.debug("OKX: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         {"channel": "liquidation-orders", "instType": "SWAP"},
                         {"channel": "trades", "instId": s_name},
@@ -333,7 +333,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("bitget")
-                    log.info("Bitget: connected")
+                    log.debug("Bitget: connected")
                     await ws.send(json.dumps({"op": "subscribe", "args": [
                         {"instType": "USDT-FUTURES", "channel": "liquidation-order", "instId": s_name},
                         {"instType": "USDT-FUTURES", "channel": "trade",             "instId": s_name},
@@ -396,7 +396,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=None) as ws:
                     await self._on_connected("gate")
-                    log.info("Gate: connected")
+                    log.debug("Gate: connected")
                     t = int(time.time())
                     await ws.send(json.dumps({"time": t, "channel": "futures.liquidates", "event": "subscribe", "payload": [s_name]}))
                     await ws.send(json.dumps({"time": t, "channel": "futures.trades",     "event": "subscribe", "payload": [s_name]}))
@@ -456,7 +456,7 @@ class ConnectionManager:
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("dydx")
-                    log.info("dYdX: connected")
+                    log.debug("dYdX: connected")
                     await ws.send(json.dumps({"type": "subscribe", "channel": "v4_trades", "id": s_name}))
                     async for raw in ws:
                         if self._s.symbol != sym:
