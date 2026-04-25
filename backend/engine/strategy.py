@@ -26,7 +26,6 @@ class Strategy:
         self._s = app_state
         self._l2 = l2_model
         self._broadcast = broadcast
-        # Throttle: last time we sent a 'tick' broadcast (ms)
         self._last_tick_ms: int = 0
         self._tick_throttle_ms: int = 100
 
@@ -34,19 +33,39 @@ class Strategy:
     # Helpers
     # ------------------------------------------------------------------
     def _candle_bucket(self, ts_ms: int) -> int:
-        """Return the candle open-time (ms) that ts_ms falls into."""
-        from engine.state import TF_MINUTES
-        tf_ms = TF_MINUTES[self._s.timeframe] * 60_000
+        """Return the candle open-time (ms) that ts_ms falls into.
+
+        Walks state.candles from oldest to newest. Returns the open-time
+        of the candle whose period contains ts_ms.
+
+        Key rule: if ts_ms >= last candle open, always return the last
+        candle's open-time. This handles live trades that arrive slightly
+        after the quantized bucket boundary.
+        """
         candles = self._s.candles
-        if candles:
-            bt = candles[0]["t"]
-            for c in candles:
-                if c["t"] <= ts_ms:
-                    bt = c["t"]
-                else:
-                    break
-            return bt
-        return (ts_ms // tf_ms) * tf_ms
+        if not candles:
+            from engine.state import TF_MINUTES
+            tf_ms = TF_MINUTES[self._s.timeframe] * 60_000
+            return (ts_ms // tf_ms) * tf_ms
+
+        # If ts_ms is before the first candle, clamp to first.
+        if ts_ms < candles[0]["t"]:
+            return candles[0]["t"]
+
+        # If ts_ms is at or after the last candle's open, return last.
+        # This is the common case for live trades.
+        if ts_ms >= candles[-1]["t"]:
+            return candles[-1]["t"]
+
+        # Binary-search the sorted list for the right bucket.
+        lo, hi = 0, len(candles) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if candles[mid]["t"] <= ts_ms:
+                lo = mid
+            else:
+                hi = mid - 1
+        return candles[lo]["t"]
 
     # ------------------------------------------------------------------
     # Candle helpers
@@ -88,7 +107,12 @@ class Strategy:
             self._s.prev_cumulative_delta = cum
 
     def update_candle(self, c: dict, is_closed: bool):
-        """Called only on kline-close to finalise a candle with authoritative OHLCV."""
+        """Create or update a candle. Called by kline handler only.
+
+        On new bucket (x=false, bucket_exists=False): inserts with full
+        Binance OHLCV as the authoritative open.
+        On close (x=True): overwrites existing candle with final OHLCV.
+        """
         from engine.state import MAX_CANDLES
         existing = next((x for x in self._s.candles if x["t"] == c["t"]), None)
         if existing:
@@ -110,25 +134,22 @@ class Strategy:
         """Update the live candle from a multi-exchange trade tick.
 
         CONTRACT:
-        - NEVER creates a new candle. Only update_candle() (kline-close)
-          and the REST history loader create candles with authoritative opens.
-        - NEVER touches the candle open. Only c / h / l / v are written here.
-
-        If the bucket isn't found (history not yet loaded, or a new candle
-        that kline hasn't opened yet), we silently skip — the correct open
-        will arrive via the Binance REST history or the next kline message.
+        - NEVER creates a new candle. Only update_candle() (kline) and
+          the REST history loader create candles with authoritative opens.
+        - NEVER touches the candle open. Only c / h / l / v are written.
+        - _candle_bucket() now always returns the last candle for live
+          trades (ts_ms >= candles[-1]["t"]), so the bucket is always
+          found once history is loaded.
         """
         if price <= 0 or not self._s.candles:
             return
 
         bt = self._candle_bucket(ts_ms)
-
-        # Only update existing candles. Silently skip if bucket not found.
         cb = next((c for c in self._s.candles if c["t"] == bt), None)
         if cb is None:
             return
 
-        # Update close, high, low, volume — open is NEVER touched here.
+        # Update close, high, low, volume — open is NEVER touched.
         cb["c"] = price
         if price > cb["h"]:
             cb["h"] = price
@@ -137,7 +158,6 @@ class Strategy:
         cb["v"] = cb.get("v", 0.0) + notional
         self._s.price = price
 
-        # Throttled broadcast
         now_ms = int(time.time() * 1000)
         if now_ms - self._last_tick_ms >= self._tick_throttle_ms:
             self._last_tick_ms = now_ms

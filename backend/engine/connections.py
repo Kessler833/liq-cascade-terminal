@@ -197,14 +197,19 @@ class ConnectionManager:
     async def _handle_binance_kline(self, k: dict):
         """Handle kline messages from Binance.
 
-        x=true  (candle close): full authoritative OHLCV — update_candle + broadcast.
-        x=false (candle open):  ONLY used to seed a new bucket that doesn't exist yet.
-                                If the bucket already exists (tick stream is handling it),
-                                we skip — avoiding any mid-candle open corruption.
+        x=true  (candle CLOSE): authoritative OHLCV written to state + broadcast
+                                as 'kline' so frontend finalises the candle.
+        x=false (candle tick):  only used when a genuinely NEW period opens
+                                (bucket not yet in state.candles). Seeds the
+                                bucket with the correct Binance open price and
+                                broadcasts 'candle_open' so the frontend can
+                                append the new row immediately.
+                                Subsequent x=false messages for the same bucket
+                                are ignored — tick stream handles live updates.
         """
         is_closed = k.get("x", False)
         c = {
-            "t": k["t"],
+            "t": int(k["t"]),
             "o": float(k["o"]),
             "h": float(k["h"]),
             "l": float(k["l"]),
@@ -213,27 +218,26 @@ class ConnectionManager:
         }
 
         if is_closed:
-            # Authoritative close: overwrite everything, broadcast kline to frontend.
+            # Authoritative close: overwrite OHLCV, mark closed, broadcast.
             self._strategy.update_candle(c, True)
             self._s.price = c["c"]
             await self._hub.broadcast({"type": "kline", **c, "closed": True})
         else:
-            # New candle open: only seed the bucket if it doesn't exist yet.
-            # This guarantees update_price_tick finds a bucket to update
-            # without ever corrupting an existing candle's open price.
+            # Only act on the very first x=false for a new bucket.
             bucket_exists = any(x["t"] == c["t"] for x in self._s.candles)
             if not bucket_exists:
+                # Seed with authoritative Binance open price.
                 self._strategy.update_candle(c, False)
-                # No frontend broadcast needed — first tick will send a 'tick' message.
+                # Explicit frontend signal: append this candle now with correct open.
+                await self._hub.broadcast({"type": "candle_open", **c})
+                log.debug(f"New candle opened: t={c['t']} o={c['o']}")
 
     async def _handle_binance_trade(self, d: dict):
         price    = float(d.get("p", 0))
         qty      = float(d.get("q", 0))
         is_buy   = not d.get("m", True)
         notional = qty * price
-        # Delta
         await self._strategy.update_delta(notional if is_buy else -notional, int(d.get("T", 0)))
-        # Price candle (throttled tick broadcast lives in Strategy)
         await self._strategy.update_price_tick(price, notional, int(d.get("T", 0)))
 
     # ------------------------------------------------------------------
