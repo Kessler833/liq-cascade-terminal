@@ -140,6 +140,8 @@ class Strategy:
         - _candle_bucket() now always returns the last candle for live
           trades (ts_ms >= candles[-1]["t"]), so the bucket is always
           found once history is loaded.
+        - Skips candles marked as closed to prevent phantom wicks during
+          the window between kline x=true and the next kline x=false.
         """
         if price <= 0 or not self._s.candles:
             return
@@ -147,6 +149,13 @@ class Strategy:
         bt = self._candle_bucket(ts_ms)
         cb = next((c for c in self._s.candles if c["t"] == bt), None)
         if cb is None:
+            return
+
+        # Don't let post-close aggTrades corrupt the just-finished bar.
+        # The tiny window between kline x=true and the next kline x=false
+        # is long enough for several multi-exchange trades to sneak in and
+        # push h/l to wrong values — creating a wick not visible on Binance.
+        if cb.get("closed"):
             return
 
         # Update close, high, low, volume — open is NEVER touched.

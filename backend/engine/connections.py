@@ -52,6 +52,7 @@ class ConnectionManager:
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
         self._gen: int = 0
+        self._last_candle_open_t: int = 0  # tracks last broadcast candle period
 
     @property
     def strategy(self) -> "Strategy":
@@ -153,6 +154,7 @@ class ConnectionManager:
     async def _run_binance(self, sym: str, gen: int):
         from engine.state import SYMBOL_MAP, TF_BINANCE
         await self._set_dot("binance", "connecting")
+        self._last_candle_open_t = 0  # reset on every new connection
         while True:
             if self._gen != gen:
                 return
@@ -199,13 +201,14 @@ class ConnectionManager:
 
         x=true  (candle CLOSE): authoritative OHLCV written to state + broadcast
                                 as 'kline' so frontend finalises the candle.
-        x=false (candle tick):  only used when a genuinely NEW period opens
-                                (bucket not yet in state.candles). Seeds the
-                                bucket with the correct Binance open price and
-                                broadcasts 'candle_open' so the frontend can
-                                append the new row immediately.
-                                Subsequent x=false messages for the same bucket
-                                are ignored — tick stream handles live updates.
+        x=false (candle tick):  broadcast 'candle_open' whenever the period
+                                timestamp changes, tracked via _last_candle_open_t.
+                                This avoids the race where REST history already
+                                contains the new period's candle at a boundary,
+                                which would silently suppress candle_open when
+                                using the old bucket_exists guard.
+                                The frontend deduplicates via the
+                                `!state.candles.find(x => x.t === c.t)` guard.
         """
         is_closed = k.get("x", False)
         c = {
@@ -223,12 +226,15 @@ class ConnectionManager:
             self._s.price = c["c"]
             await self._hub.broadcast({"type": "kline", **c, "closed": True})
         else:
-            # Only act on the very first x=false for a new bucket.
-            bucket_exists = any(x["t"] == c["t"] for x in self._s.candles)
-            if not bucket_exists:
-                # Seed with authoritative Binance open price.
+            # Track by period timestamp, not by what's in self._s.candles.
+            # self._s.candles may already contain the new period (loaded from
+            # REST history right at a boundary), which would silently suppress
+            # candle_open — leaving the frontend stuck on the previous candle.
+            if c["t"] != self._last_candle_open_t:
+                self._last_candle_open_t = c["t"]
                 self._strategy.update_candle(c, False)
-                # Explicit frontend signal: append this candle now with correct open.
+                # Always broadcast; frontend already deduplicates via the
+                # `!state.candles.find(x => x.t === c.t)` guard in main.ts.
                 await self._hub.broadcast({"type": "candle_open", **c})
                 log.debug(f"New candle opened: t={c['t']} o={c['o']}")
 
