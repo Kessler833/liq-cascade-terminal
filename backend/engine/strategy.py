@@ -28,6 +28,31 @@ class Strategy:
         self._broadcast = broadcast
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _candle_bucket(self, ts_ms: int) -> int:
+        """Return the candle open-time (ms) that ts_ms falls into.
+
+        Snaps to actual candle timestamps so liq/delta bars always
+        align with the candles rendered by lightweight-charts.
+        Falls back to pure TF-interval bucketing if no candles exist.
+        """
+        from engine.state import TF_MINUTES
+        tf_ms = TF_MINUTES[self._s.timeframe] * 60_000
+        candles = self._s.candles
+        if candles:
+            # Find the last candle whose open is <= ts_ms
+            bt = candles[0]["t"]
+            for c in candles:
+                if c["t"] <= ts_ms:
+                    bt = c["t"]
+                else:
+                    break
+            return bt
+        # No candles yet — fall back to interval math
+        return (ts_ms // tf_ms) * tf_ms
+
+    # ------------------------------------------------------------------
     # Candle helpers
     # ------------------------------------------------------------------
     def apply_liq_store(self, sym: str, tf: str):
@@ -100,10 +125,8 @@ class Strategy:
             s.delta_store[s.symbol].append(sb)
         sb["delta"] += vol_delta
 
-        # Current TF bucket
-        from engine.state import TF_MINUTES
-        tf_ms = TF_MINUTES[s.timeframe] * 60_000
-        bt = (ts_ms // tf_ms) * tf_ms
+        # Snap to candle open time
+        bt = self._candle_bucket(ts_ms)
         db = next((b for b in s.delta_bars if b["t"] == bt), None)
         if db is None:
             db = {"t": bt, "delta": 0.0, "cum_delta": s.cumulative_delta}
@@ -164,10 +187,8 @@ class Strategy:
             s.shorts_liq_events += 1
         s.exchanges[exchange][side] += usd_val
 
-        # Current TF liq bar
-        from engine.state import TF_MINUTES
-        tf_ms = TF_MINUTES[s.timeframe] * 60_000
-        bt = (now_ms // tf_ms) * tf_ms
+        # Snap to candle open time so liq bars align with price chart
+        bt = self._candle_bucket(now_ms)
         lb = next((b for b in s.liq_bars if b["t"] == bt), None)
         if lb is None:
             lb = {"t": bt, "long_usd": 0.0, "short_usd": 0.0}
