@@ -196,15 +196,19 @@ def _build_composite(
         for k in sorted_keys
     ]
 
-    # Find data cutoff: last level where exchange count == N_BOOK_EXCHANGES.
-    # Everything beyond that is partial-exchange data.
+    # Find data cutoff: deepest level where exchange count == N_BOOK_EXCHANGES.
+    # FIX Bug-2: use `continue` instead of `break` so the scan walks the full
+    # book and always returns the *deepest* fully-covered level.
+    # The old `break` assumed exchanges drop out monotonically — they don't.
+    # Exchanges like Bitget commonly have sparse mid-book levels (gaps) that
+    # resume contributing deeper in the book.  Breaking on the first gap set
+    # cutoff_price very close to mid, causing almost every model call to report
+    # beyond_cutoff=True even for small cascades that never left the mid-book.
     cutoff_price: float | None = None
     total_ex = N_BOOK_EXCHANGES
     for price, usd, n_ex in sorted_levels:
         if n_ex >= total_ex:
-            cutoff_price = price
-        else:
-            break  # once any exchange drops out, cutoff is the previous level
+            cutoff_price = price   # keep updating — don't stop early
 
     return sorted_levels, cutoff_price
 
