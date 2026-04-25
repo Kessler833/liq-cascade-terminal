@@ -15,7 +15,7 @@ import {
 import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLiqChart, updateDeltaChart,
-  updateLastCandle, resizeAll, setupChartSync,
+  resizeAll, setupChartSync,
   onNearLeftEdge, getVisibleLogicalRange, setVisibleLogicalRange,
   scrollToLatest, fitAllCharts,
 } from './charts';
@@ -112,7 +112,6 @@ function rebuildAuxBars(candles: Candle[]) {
 
 /**
  * Ensure state.liq_bars and state.delta_bars have a slot for timestamp t.
- * Called on every live kline tick so delta/liq handlers always have somewhere to write.
  */
 function ensureAuxSlot(t: number) {
   if (!state.liq_bars.find(b => b.t === t)) {
@@ -172,8 +171,7 @@ onMessage((msg: ServerMsg) => {
       state.price = msg.c;
       updatePrice(msg.c);
 
-      // Always upsert into state.candles so it stays current for both open and closed candles.
-      // This prevents updateLastCandle from operating on a stale series after a symbol switch.
+      // Upsert into state.candles (both open and closed ticks)
       const idx = state.candles.findIndex(x => x.t === c.t);
       if (idx >= 0) {
         state.candles[idx] = c;
@@ -186,19 +184,14 @@ onMessage((msg: ServerMsg) => {
         }
       }
 
-      // Ensure aux bar slots exist for the current candle timestamp
       ensureAuxSlot(c.t);
 
-      if (msg.closed) {
-        updatePriceChart(state.candles);
-        updateStatusBar({ candles: state.candles.length, lastUpdate: true });
-      } else {
-        // updateLastCandle is cheap (single update() call) but can be silently
-        // rejected by lightweight-charts if time ordering is violated after
-        // a setData() reset. The charts.ts wrapper handles the fallback.
-        updateLastCandle(c);
-        updateStatusBar({ lastUpdate: true });
-      }
+      // Always use updatePriceChart (setData) for every tick, both open and closed.
+      // candleSeries.update() silently no-ops when time <= series cursor after any
+      // setData() reset (e.g. history load, symbol switch), causing the price chart
+      // to freeze for the remainder of the candle period.
+      updatePriceChart(state.candles);
+      updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
     }
 
