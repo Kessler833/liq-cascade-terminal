@@ -272,8 +272,9 @@ class ConnectionManager:
         side  = "short" if o.get("S") == "BUY" else "long"
         price = ap
         await self._strategy.on_liquidation("binance", side, usd, price, o.get("s", ""), event_sym)
-        if event_sym == self._s.symbol:
-            await self._impact.on_liquidation("binance", side, usd, price)
+        # FIX: always record impact for every symbol, not just the active one.
+        # impact.on_liquidation now accepts sym= and uses per-symbol price/delta/book.
+        await self._impact.on_liquidation("binance", side, usd, price, sym=event_sym)
 
     async def _handle_binance_kline(self, k: dict, event_sym: str):
         """Receives @kline_1m messages; aggregates into the current user-selected TF.
@@ -406,18 +407,22 @@ class ConnectionManager:
                                     await self._strategy.on_liquidation(
                                         "bybit", side, usd, price, d.get("s", ""), event_sym
                                     )
-                                    if event_sym == self._s.symbol:
-                                        await self._impact.on_liquidation("bybit", side, usd, price)
+                                    # FIX: unconditional — impact.py now handles any sym.
+                                    await self._impact.on_liquidation("bybit", side, usd, price, sym=event_sym)
                             elif topic.startswith("publicTrade"):
                                 for d in items:
                                     event_sym = bybit_to_sym.get(d.get("s"))
-                                    if not event_sym or event_sym != self._s.symbol:
+                                    if not event_sym:
                                         continue
                                     price    = float(d.get("p", 0))
                                     notional = self._strategy.get_trade_notional(
                                         "bybit", event_sym, float(d.get("v", 0)), price
                                     )
                                     is_buy = d.get("S") == "Buy"
+                                    # FIX: update delta/price for ALL symbols so sym_price
+                                    # and sym_delta are populated when a liq fires on a
+                                    # non-active symbol. strategy.py gates candle/broadcast
+                                    # writes internally.
                                     await self._strategy.update_delta(
                                         notional if is_buy else -notional, int(d.get("T", 0)), event_sym
                                     )
@@ -493,13 +498,15 @@ class ConnectionManager:
                                             await self._strategy.on_liquidation(
                                                 "okx", side, usd, bk_px, inst_id, event_sym
                                             )
-                                            if event_sym == self._s.symbol:
-                                                await self._impact.on_liquidation("okx", side, usd, bk_px)
+                                            # FIX: unconditional — impact.py now handles any sym.
+                                            await self._impact.on_liquidation("okx", side, usd, bk_px, sym=event_sym)
                             elif ch == "trades" and data:
                                 inst_id = arg.get("instId", "")
                                 event_sym = okx_to_sym.get(inst_id)
-                                if not event_sym or event_sym != self._s.symbol:
+                                if not event_sym:
                                     continue
+                                # FIX: removed event_sym != self._s.symbol guard.
+                                # update_delta / update_price_tick must run for all symbols.
                                 for d in data:
                                     price    = float(d.get("px", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -583,11 +590,11 @@ class ConnectionManager:
                                         await self._strategy.on_liquidation(
                                             "bitget", side, usd, fp, inst_id, event_sym
                                         )
-                                        if event_sym == self._s.symbol:
-                                            await self._impact.on_liquidation("bitget", side, usd, fp)
+                                        # FIX: unconditional — impact.py now handles any sym.
+                                        await self._impact.on_liquidation("bitget", side, usd, fp, sym=event_sym)
                             elif ch == "trade" and items:
-                                if event_sym != self._s.symbol:
-                                    continue
+                                # FIX: removed event_sym != self._s.symbol guard.
+                                # update_delta / update_price_tick must run for all symbols.
                                 for d in items:
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -667,14 +674,16 @@ class ConnectionManager:
                                         await self._strategy.on_liquidation(
                                             "gate", side, usd, price, contract, event_sym
                                         )
-                                        if event_sym == self._s.symbol:
-                                            await self._impact.on_liquidation("gate", side, usd, price)
+                                        # FIX: unconditional — impact.py now handles any sym.
+                                        await self._impact.on_liquidation("gate", side, usd, price, sym=event_sym)
                             elif ch == "futures.trades" and items:
                                 for d in items:
                                     contract  = d.get("contract", "")
                                     event_sym = gate_to_sym.get(contract)
-                                    if not event_sym or event_sym != self._s.symbol:
+                                    if not event_sym:
                                         continue
+                                    # FIX: removed event_sym != self._s.symbol guard.
+                                    # update_delta / update_price_tick must run for all symbols.
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
                                         "gate", event_sym, abs(float(d.get("size", 0))), price
@@ -739,8 +748,11 @@ class ConnectionManager:
                             continue
                         market_id = msg.get("id", "")
                         event_sym = dydx_to_sym.get(market_id)
-                        if not event_sym or event_sym != self._s.symbol:
+                        if not event_sym:
                             continue
+                        # FIX: removed event_sym != self._s.symbol guard.
+                        # update_delta / update_price_tick must run for all symbols
+                        # so sym_price and sym_delta stay populated for non-active syms.
                         contents = msg.get("contents", {})
                         trades_data = []
                         if msg_type == "subscribed":
