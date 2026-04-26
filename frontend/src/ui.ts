@@ -46,11 +46,6 @@ export function initControls(
         document.getElementById('terminal-screen')?.classList.add('hidden');
         document.getElementById('impact-screen')?.classList.remove('hidden');
         document.getElementById('strategy-bar')?.classList.add('hidden');
-        // FIX: render the table immediately from local state on every tab switch.
-        // Previously the tab was blank until the next impact_update WS message
-        // arrived (which only fires when a new observation is recorded, not on
-        // demand). state.impact_obs is already populated from the impact_update
-        // sent by the backend as part of the connection handshake.
         const errs = state.impact_obs
           .map(o => o.price_error_pct)
           .filter((v): v is number => v != null);
@@ -110,14 +105,21 @@ export function updateStats(stats: Stats) {
   setText('stat-longs',    fmtUSD(stats.longs_liq_usd));
   setText('stat-shorts',   fmtUSD(stats.shorts_liq_usd));
   setText('liqRate1m',     fmtUSD(stats.liq_1m_bucket) + '/m');
-  const dEl = document.getElementById('deltaDisplay');
-  if (dEl) {
-    dEl.textContent = fmtDelta(stats.cumulative_delta);
-    dEl.style.color = stats.cumulative_delta >= 0
-      ? 'var(--green)'
-      : 'var(--red)';
-  }
+  // deltaDisplay is updated separately by updateBarDelta() on every delta tick —
+  // do NOT overwrite it here with the session-wide cumulative_delta.
   updateExchangeList(stats);
+}
+
+/**
+ * Update the strategy-bar delta readout with the current-candle bar delta.
+ * This resets each candle rather than accumulating since session start,
+ * keeping the number in a human-readable range (not billions).
+ */
+export function updateBarDelta(barDelta: number) {
+  const dEl = document.getElementById('deltaDisplay');
+  if (!dEl) return;
+  dEl.textContent = fmtDelta(barDelta);
+  dEl.style.color = barDelta >= 0 ? 'var(--green)' : 'var(--red)';
 }
 
 export function updateCascadeMeter(pct: number) {
@@ -189,14 +191,10 @@ export function prependFeedItem(item: FeedItem) {
   const list = document.getElementById('liq-feed');
   if (!list) return;
   const row = el('div', `feed-item ${item.side}`);
-  // FIX: item.symbol came from an exchange WebSocket payload and was interpolated
-  // directly into innerHTML, creating a latent XSS vector. Use textContent on
-  // individual child elements instead so no exchange-provided value is ever
-  // treated as HTML markup.
   const exchSpan  = el('span', 'feed-exch', item.exchange.slice(0, 4).toUpperCase());
   const sideSpan  = el('span', 'feed-side', item.side.toUpperCase());
   const symSpan   = el('span', 'feed-sym');
-  symSpan.textContent = item.symbol;   // always textContent, never innerHTML
+  symSpan.textContent = item.symbol;
   const sizeSpan  = el('span', 'feed-size',  fmtUSD(item.usd_val));
   const priceSpan = el('span', 'feed-price', '@ ' + fmtPrice(item.price));
   const timeSpan  = el('span', 'feed-time',  fmtTime(item.ts));
