@@ -17,13 +17,17 @@ Key concepts
 * beyond_cutoff flag — when the model's terminal price estimate crosses
   the cutoff, the result carries beyond_cutoff=True and cutoff_price so
   the frontend can draw a stop-line on the impact chart.
+* Multi-symbol — books for ALL symbols in SYMBOL_MAP are refreshed every
+  REFRESH_S seconds in parallel.  compute_terminal_price takes an explicit
+  sym argument so ImpactRecorder can query the correct book regardless of
+  which symbol is currently displayed in the UI.
 
 Spec algorithm (unchanged from previous fix)
 --------------------------------------------
-  total_pressure = LIQ_remaining + Δ_current   (additive, not multiplicative)
-  If total_pressure ≤ 0 → absorbed, terminal_price = mid.
-  Walk bids  for long  liq (forced sell → price moves down).
-  Walk asks  for short liq (forced buy  → price moves up).
+  total_pressure = LIQ_remaining + delta_current   (additive, not multiplicative)
+  If total_pressure <= 0 -> absorbed, terminal_price = mid.
+  Walk bids  for long  liq (forced sell -> price moves down).
+  Walk asks  for short liq (forced buy  -> price moves up).
 """
 from __future__ import annotations
 
@@ -46,7 +50,6 @@ BOOK_DEPTH = 50     # levels per exchange per side
 N_BOOK_EXCHANGES = 5
 
 # Per-symbol price bucket size (USD).  Levels are rounded to this grid.
-# Smaller assets get finer buckets so close-to-mid precision is preserved.
 BUCKET_SIZE: dict[str, float] = {
     "BTC":  10.0,
     "ETH":  1.0,
@@ -79,7 +82,6 @@ DEFAULT_EXTRAP_PCT = 2.0
 
 async def _fetch_binance(http: httpx.AsyncClient, sym_name: str
                          ) -> tuple[list[tuple[float,float]], list[tuple[float,float]]]:
-    """Returns (bids, asks) as (price, qty_usd) tuples."""
     url = f"https://fapi.binance.com/fapi/v1/depth?symbol={sym_name.upper()}&limit={BOOK_DEPTH}"
     r = await http.get(url, timeout=4.0)
     r.raise_for_status()
@@ -102,17 +104,10 @@ async def _fetch_bybit(http: httpx.AsyncClient, sym_name: str
 
 async def _fetch_okx(http: httpx.AsyncClient, sym_name: str
                      ) -> tuple[list[tuple[float,float]], list[tuple[float,float]]]:
-    """OKX perp order book. sz is in contracts; we fetch contract size from state later.
-    For simplicity, contract_size_usd ≈ price * contracts * contract_size_base.
-    We pass raw (price, contracts) and caller applies contract size.
-    Actually OKX book sz for SWAP is in contracts (base coin for most).
-    We return (price, notional_usd) like other exchanges.
-    """
     url = f"https://www.okx.com/api/v5/market/books?instId={sym_name}&sz={BOOK_DEPTH}"
     r = await http.get(url, timeout=4.0)
     r.raise_for_status()
     data = r.json().get("data", [{}])[0]
-    # OKX: [price, sz_contracts, _, _]. sz in base coin for linear SWAP.
     bids = [(float(row[0]), float(row[0]) * float(row[1])) for row in data.get("bids", [])]
     asks = [(float(row[0]), float(row[0]) * float(row[1])) for row in data.get("asks", [])]
     return bids, asks
@@ -135,8 +130,6 @@ async def _fetch_gate(http: httpx.AsyncClient, sym_name: str
     r = await http.get(url, timeout=4.0)
     r.raise_for_status()
     data = r.json()
-    # Gate returns {"bids": [{"p": price, "s": size_contracts}, ...], "asks": [...]}
-    # size is in contracts (1 contract = 1 USD for most USDT perps on Gate)
     bids = [(float(row["p"]), float(row["p"]) * float(row["s"])) for row in data.get("bids", [])]
     asks = [(float(row["p"]), float(row["p"]) * float(row["s"])) for row in data.get("asks", [])]
     return bids, asks
@@ -147,7 +140,6 @@ async def _fetch_gate(http: httpx.AsyncClient, sym_name: str
 # ---------------------------------------------------------------------------
 
 def _bucket_price(price: float, bucket: float) -> float:
-    """Round price DOWN to the nearest bucket boundary."""
     return math.floor(price / bucket) * bucket
 
 
@@ -159,24 +151,12 @@ def _build_composite(
 ) -> tuple[list[tuple[float, float, int]], float | None]:
     """Merge per-exchange books into a bucketed composite.
 
-    Args:
-        exchange_books: list of (exchange_name, bids, asks)
-        side:           "long" (walk bids) or "short" (walk asks)
-        sym:            canonical symbol e.g. "BTC"
-        mid:            current mid price
-
-    Returns:
-        (sorted_levels, data_cutoff_price)
-
-        sorted_levels  — list of (price, total_usd_notional, n_exchanges)
-                         sorted from best price toward worst (closest → farthest
-                         from mid in the relevant direction)
-        data_cutoff_price — deepest price where ALL N_BOOK_EXCHANGES contributed
-                           a level in that region; None if all levels qualify
+    Returns (sorted_levels, data_cutoff_price).
+    sorted_levels — (price, total_usd_notional, n_exchanges) sorted from
+    best price toward worst.
+    data_cutoff_price — deepest price where ALL N_BOOK_EXCHANGES contributed.
     """
     bucket = BUCKET_SIZE.get(sym, DEFAULT_BUCKET)
-
-    # bucket_key -> {"usd": float, "exchanges": set[str]}
     composite: dict[float, dict] = {}
 
     for ex_name, bids, asks in exchange_books:
@@ -188,29 +168,38 @@ def _build_composite(
             composite[key]["usd"] += usd_notional
             composite[key]["exchanges"].add(ex_name)
 
-    # Sort: for long liq (bids) → descending price (best bid first, walk down)
-    #        for short liq (asks) → ascending price (best ask first, walk up)
     sorted_keys = sorted(composite.keys(), reverse=(side == "long"))
     sorted_levels = [
         (k, composite[k]["usd"], len(composite[k]["exchanges"]))
         for k in sorted_keys
     ]
 
-    # Find data cutoff: deepest level where exchange count == N_BOOK_EXCHANGES.
-    # FIX Bug-2: use `continue` instead of `break` so the scan walks the full
-    # book and always returns the *deepest* fully-covered level.
-    # The old `break` assumed exchanges drop out monotonically — they don't.
-    # Exchanges like Bitget commonly have sparse mid-book levels (gaps) that
-    # resume contributing deeper in the book.  Breaking on the first gap set
-    # cutoff_price very close to mid, causing almost every model call to report
-    # beyond_cutoff=True even for small cascades that never left the mid-book.
+    # FIX Bug-2: walk the full book to find the *deepest* fully-covered level.
+    # Old break-on-first-gap logic set cutoff_price too close to mid.
     cutoff_price: float | None = None
-    total_ex = N_BOOK_EXCHANGES
     for price, usd, n_ex in sorted_levels:
-        if n_ex >= total_ex:
-            cutoff_price = price   # keep updating — don't stop early
+        if n_ex >= N_BOOK_EXCHANGES:
+            cutoff_price = price
 
     return sorted_levels, cutoff_price
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol book cache entry
+# ---------------------------------------------------------------------------
+
+_BookSide = list[tuple[float, float, int]]   # (price, usd, n_exchanges)
+
+
+class _SymbolBook:
+    """Cached composite order book for a single symbol."""
+    __slots__ = ("bids", "asks", "bid_cutoff", "ask_cutoff")
+
+    def __init__(self):
+        self.bids: _BookSide = []
+        self.asks: _BookSide = []
+        self.bid_cutoff: float | None = None
+        self.ask_cutoff: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +212,8 @@ class L2Model:
         self._task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=5.0)
 
-        # Latest composite books keyed by side
-        self._bids: list[tuple[float, float, int]] = []  # (price, usd, n_exchanges) descending
-        self._asks: list[tuple[float, float, int]] = []  # (price, usd, n_exchanges) ascending
-        self._bid_cutoff: float | None = None
-        self._ask_cutoff: float | None = None
+        # Per-symbol book cache — keyed by canonical symbol ("BTC", "ETH", ...)
+        self._books: dict[str, _SymbolBook] = {}
 
     async def start(self):
         self._task = asyncio.create_task(self._refresh_loop(), name="l2_refresh")
@@ -241,52 +227,58 @@ class L2Model:
     # ------------------------------------------------------------------
     async def _refresh_loop(self):
         while True:
-            await self._fetch_composite_book()
+            await self._fetch_all_symbols()
             await asyncio.sleep(REFRESH_S)
 
-    async def _fetch_composite_book(self):
+    async def _fetch_all_symbols(self):
+        """Refresh composite books for ALL symbols in SYMBOL_MAP in parallel."""
         from engine.state import SYMBOL_MAP
-        sym  = self._s.symbol
-        mid  = self._s.price or 0.0
-        maps = SYMBOL_MAP.get(sym, {})
 
-        fetchers = [
-            ("binance", _fetch_binance(self._http, maps.get("binance", ""))),
-            ("bybit",   _fetch_bybit(  self._http, maps.get("bybit",   ""))),
-            ("okx",     _fetch_okx(    self._http, maps.get("okx",     ""))),
-            ("bitget",  _fetch_bitget( self._http, maps.get("bitget",  ""))),
-            ("gate",    _fetch_gate(   self._http, maps.get("gate",    ""))),
-            # dYdX excluded: no public REST order book endpoint
-        ]
+        async def _fetch_one(sym: str):
+            maps = SYMBOL_MAP.get(sym, {})
+            # Use sym_price if available (live tick), else 0.
+            mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
-        results = await asyncio.gather(
-            *[coro for _, coro in fetchers],
+            fetchers = [
+                ("binance", _fetch_binance(self._http, maps.get("binance", ""))),
+                ("bybit",   _fetch_bybit(  self._http, maps.get("bybit",   ""))),
+                ("okx",     _fetch_okx(    self._http, maps.get("okx",     ""))),
+                ("bitget",  _fetch_bitget( self._http, maps.get("bitget",  ""))),
+                ("gate",    _fetch_gate(   self._http, maps.get("gate",    ""))),
+            ]
+            results = await asyncio.gather(
+                *[coro for _, coro in fetchers],
+                return_exceptions=True,
+            )
+            exchange_books: list[tuple[str, list, list]] = []
+            for (ex_name, _), result in zip(fetchers, results):
+                if isinstance(result, Exception):
+                    log.debug("L2 fetch %s/%s: %s", sym, ex_name, result)
+                    continue
+                bids, asks = result
+                exchange_books.append((ex_name, bids, asks))
+
+            if not exchange_books:
+                return  # keep stale book
+
+            bids, bid_cutoff = _build_composite(exchange_books, "long",  sym, mid)
+            asks, ask_cutoff = _build_composite(exchange_books, "short", sym, mid)
+
+            book = self._books.setdefault(sym, _SymbolBook())
+            book.bids       = bids
+            book.asks       = asks
+            book.bid_cutoff = bid_cutoff
+            book.ask_cutoff = ask_cutoff
+
+            log.debug(
+                "L2 [%s]: %d bid / %d ask buckets from %d exchanges",
+                sym, len(bids), len(asks), len(exchange_books),
+            )
+
+        # Refresh all symbols concurrently.
+        await asyncio.gather(
+            *[_fetch_one(sym) for sym in SYMBOL_MAP],
             return_exceptions=True,
-        )
-
-        exchange_books: list[tuple[str, list, list]] = []
-        for (ex_name, _), result in zip(fetchers, results):
-            if isinstance(result, Exception):
-                log.debug(f"L2 fetch {ex_name}: {result}")
-                continue
-            bids, asks = result
-            exchange_books.append((ex_name, bids, asks))
-
-        if not exchange_books:
-            return  # all fetches failed, keep stale book
-
-        bids, bid_cutoff = _build_composite(exchange_books, "long",  sym, mid)
-        asks, ask_cutoff = _build_composite(exchange_books, "short", sym, mid)
-
-        self._bids        = bids
-        self._asks        = asks
-        self._bid_cutoff  = bid_cutoff
-        self._ask_cutoff  = ask_cutoff
-
-        log.debug(
-            f"L2 composite: {len(bids)} bid buckets / {len(asks)} ask buckets "
-            f"from {len(exchange_books)} exchanges | "
-            f"bid cutoff={bid_cutoff} ask cutoff={ask_cutoff}"
         )
 
     # ------------------------------------------------------------------
@@ -295,37 +287,52 @@ class L2Model:
         liq_notional: float,
         cum_delta: float,
         side: str,
+        sym: str | None = None,
     ) -> dict:
-        """Walk the composite book until total pressure (LIQ + Δ) is consumed.
+        """Walk the composite book for `sym` until total pressure is consumed.
+
+        Parameters
+        ----------
+        liq_notional : float  — remaining liquidation notional (USD)
+        cum_delta    : float  — cumulative delta for the symbol being modelled
+        side         : str    — "long" or "short"
+        sym          : str    — canonical symbol key (e.g. "BTC").  Defaults to
+                                self._s.symbol for backwards compatibility.
 
         Returns
         -------
         dict with keys:
-            terminal_price  float  — estimated price at which liq is absorbed
+            terminal_price  float  — estimated absorption price
             levels_consumed int    — number of price buckets consumed
-            absorbed        bool   — organic delta fully neutralised the liq
-            beyond_cutoff   bool   — terminal price crossed the data-cutoff line
-            cutoff_price    float | None — the stop line price
+            absorbed        bool   — delta fully neutralised the liq
+            beyond_cutoff   bool   — estimate crossed the data-cutoff line
+            cutoff_price    float | None
         """
-        mid = self._s.price or 0.0
-        sym = self._s.symbol
+        if sym is None:
+            sym = self._s.symbol
+
+        # Use per-symbol live price; fall back to active-symbol price.
+        mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
         if mid == 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
                     "beyond_cutoff": False, "cutoff_price": None}
 
-        # Spec Bug-1 fix: delta is additive pressure
         total_pressure = liq_notional + cum_delta
 
         if total_pressure <= 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": True,
                     "beyond_cutoff": False, "cutoff_price": None}
 
-        # Spec Bug-2 fix: correct sides
-        # long  liq = forced sell → price down → consume bids (buy orders)
-        # short liq = forced buy  → price up   → consume asks (sell orders)
-        book   = self._bids   if side == "long" else self._asks
-        cutoff = self._bid_cutoff if side == "long" else self._ask_cutoff
+        book_entry = self._books.get(sym)
+        if book_entry is None:
+            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
+                    "beyond_cutoff": False, "cutoff_price": None}
+
+        # long liq = forced sell -> price down -> consume bids
+        # short liq = forced buy  -> price up   -> consume asks
+        book   = book_entry.bids   if side == "long" else book_entry.asks
+        cutoff = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
 
         if not book:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
@@ -337,7 +344,6 @@ class L2Model:
         beyond_cutoff = False
 
         for price, usd, _n_ex in book:
-            # Check if we've crossed the cutoff before consuming this level
             if cutoff is not None:
                 if side == "long"  and price < cutoff:
                     beyond_cutoff = True
@@ -352,18 +358,15 @@ class L2Model:
             terminal   = price
             consumed  += 1
         else:
-            # Book exhausted — extrapolate
             extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
             extra_pct  = (remaining / total_pressure) * extrap_pct
             if side == "long":
                 terminal *= (1 - extra_pct / 100)
             else:
                 terminal *= (1 + extra_pct / 100)
-            # Extrapolation is always beyond whatever cutoff exists
             if cutoff is not None:
                 beyond_cutoff = True
 
-        # absorbed: counter-flow consumed more than half the liq notional
         absorbed = cum_delta < 0 and abs(cum_delta) > liq_notional * 0.5
 
         return {

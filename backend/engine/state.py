@@ -187,6 +187,13 @@ class AppState:
     liq_store:   dict = field(default_factory=lambda: defaultdict(list))
     delta_store: dict = field(default_factory=lambda: defaultdict(list))
 
+    # Per-symbol live price and cumulative delta used by ImpactRecorder
+    # so _tick_all can read the correct mid-price and delta for each
+    # symbol's active observation regardless of which symbol is displayed.
+    # Populated by Strategy.update_price_tick and Strategy.update_delta.
+    sym_price: dict = field(default_factory=dict)   # sym -> float
+    sym_delta: dict = field(default_factory=dict)   # sym -> float
+
     def reset_stats(self):
         self.total_liq         = 0.0
         self.total_liq_events  = 0
@@ -208,3 +215,5 @@ class AppState:
         self.feed_count        = 0
         self.signal_log        = []
         self.exchanges         = _default_exchanges()
+        # Note: sym_price and sym_delta are NOT reset — they are global
+        # cross-symbol trackers and must survive active-symbol switches.

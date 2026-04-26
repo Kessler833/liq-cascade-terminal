@@ -3,6 +3,11 @@
 Records per-cascade observations: entry price, liq volume, predicted vs actual
 terminal price, delta series, price series, and liq-remaining tank.
 
+Multi-symbol: all symbols are tracked in parallel. Each symbol has its own
+entry in self.active. _tick_all reads per-symbol price and delta from
+AppState.sym_price / AppState.sym_delta so every observation gets the correct
+market context regardless of which symbol is currently displayed.
+
 DB changes vs. original (all marked  # DB):
   - imports json + db.database
   - _obs_to_db_row() / _db_row_to_obs()  serialise / deserialise
@@ -28,10 +33,6 @@ import db.database as _db                    # DB
 log = logging.getLogger("liqterm.impact")
 
 SILENCE_WINDOW_S = 30.0
-# FIX: lowered from 100_000 to 1_000 to match strategy.py MIN_LIQ_USD.
-# The previous 100k threshold silently dropped all liquidations below $100k,
-# meaning smaller cascades on lower-cap assets (SUI, LINK, DOGE) were never
-# recorded as impact observations. 1k aligns with the feed/stats threshold.
 MIN_LIQ_USD      = 1_000
 TICK_INTERVAL_S  = 0.2
 
@@ -104,7 +105,6 @@ def _obs_to_db_row(obs: dict) -> dict:       # DB
 
 
 def _db_row_to_obs(row: dict) -> dict:       # DB
-    """Reconstruct an in-memory observation dict from a DB row."""
     return {
         "id":                     row["obs_id"],
         "asset":                  row["asset"],
@@ -130,7 +130,6 @@ def _db_row_to_obs(row: dict) -> dict:       # DB
         "liq_remaining_series":   _jload(row.get("liq_remaining_series")),
         "cascade_events":         _jload(row.get("cascade_events_json")),
         "label_filled":           row.get("label_filled", 1),
-        # Cutoff fields: not stored in DB (stale after restart anyway)
         "beyond_cutoff":          False,
         "cutoff_price":           None,
     }
@@ -178,10 +177,10 @@ class ImpactRecorder:
         _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
     # ------------------------------------------------------------------
-    # FIX Bug-1: on_liquidation now accepts an explicit `sym` argument so
-    # callers can record observations for any symbol, not just the active one.
-    # Defaults to self._s.symbol to preserve backwards compatibility with
-    # existing call-sites in connections.py that already filter by symbol.
+    # on_liquidation: record for any symbol, not just the active one.
+    # `sym` is the canonical symbol key (e.g. "BTC", "ETH", "SOL").
+    # connections.py passes event_sym for every liq event it receives,
+    # so all connected symbols are tracked in parallel.
     # ------------------------------------------------------------------
     async def on_liquidation(
         self,
@@ -199,25 +198,23 @@ class ImpactRecorder:
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
-            # Extend existing cascade — no await, no suspension point.
             active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
         else:
-            # FIX: _tick_task singleton race — task created BEFORE any await.
+            # Ensure the tick loop is running before the first await.
             if self._tick_task is None or self._tick_task.done():
                 self._tick_task = asyncio.create_task(self._tick_loop())
 
             if active:
                 await self._close_obs(sym)
 
-            # Use price from the active symbol for L2 model inputs; the L2
-            # book is keyed on the active symbol so cross-symbol predictions
-            # are not supported, but the observation is still recorded.
-            delta = self._s.cumulative_delta
-            res   = self._l2.compute_terminal_price(usd_val, delta, side)
+            # Read per-symbol delta and price — fall back to active-symbol
+            # values if the symbol hasn't had any ticks yet (cold start).
+            delta = self._s.sym_delta.get(sym, self._s.cumulative_delta)
+            res   = self._l2.compute_terminal_price(usd_val, delta, side, sym=sym)
             obs = {
                 "id":                    _gen_id(),
                 "asset":                 sym,
@@ -236,7 +233,6 @@ class ImpactRecorder:
                 "expected_price_series": [],
                 "price_series":          [],
                 "liq_remaining_series":  [],
-                # cutoff tracking (updated every tick)
                 "beyond_cutoff":         res["beyond_cutoff"],
                 "cutoff_price":          res["cutoff_price"],
                 "cascade_events":        [[now, usd_val, exchange]],
@@ -265,20 +261,22 @@ class ImpactRecorder:
         to_close = []
         for sym, obs in list(self.active.items()):
             obs["liq_remaining"] = max(0, obs["liq_remaining"] * 0.97)
+
+            # Per-symbol price and delta — fall back to active-symbol values
+            # only if this symbol hasn't sent any ticks yet (cold start).
+            sym_price = self._s.sym_price.get(sym) or self._s.price
+            sym_delta = self._s.sym_delta.get(sym, self._s.cumulative_delta)
+
             res = self._l2.compute_terminal_price(
-                obs["liq_remaining"], self._s.cumulative_delta, obs["side"]
+                obs["liq_remaining"], sym_delta, obs["side"], sym=sym
             )
-            obs["delta_series"].append([now, self._s.cumulative_delta])
+            obs["delta_series"].append([now, sym_delta])
             obs["expected_price_series"].append([now, res["terminal_price"]])
-            obs["price_series"].append([now, self._s.price])
+            obs["price_series"].append([now, sym_price])
             obs["liq_remaining_series"].append([now, obs["liq_remaining"]])
 
-            # Track cutoff: once beyond_cutoff is True it stays True for the
-            # life of the observation (pressure only decreases, so if we crossed
-            # the cutoff line we never come back within it on this cascade).
             if res["beyond_cutoff"]:
                 obs["beyond_cutoff"] = True
-            # Always update cutoff_price in case the book was refreshed
             if res["cutoff_price"] is not None:
                 obs["cutoff_price"] = res["cutoff_price"]
 
@@ -301,7 +299,10 @@ class ImpactRecorder:
             if obs["expected_price_series"]
             else obs["initial_expected_price"]
         )
-        obs["actual_terminal_price"] = self._s.price
+        # Use the per-symbol actual price at close time.
+        obs["actual_terminal_price"] = (
+            self._s.sym_price.get(sym) or self._s.price
+        )
         if obs["entry_price"]:
             obs["price_error_pct"] = (
                 (obs["actual_terminal_price"] - obs["final_expected_price"])
@@ -320,7 +321,6 @@ class ImpactRecorder:
         return list(self.active.values()) + self.observations
 
     def to_serialisable(self, obs: dict) -> dict:
-        """Convert float timestamps to ms ints for JSON transport."""
         def ts(t: float) -> int:
             return int(t * 1000)
         return {
@@ -332,7 +332,6 @@ class ImpactRecorder:
             "price_series":          [[ts(t), v] for t, v in obs["price_series"]],
             "liq_remaining_series":  [[ts(t), v] for t, v in obs["liq_remaining_series"]],
             "cascade_events":        [[ts(t), v, ex] for t, v, ex in obs["cascade_events"]],
-            # cutoff fields passed through as-is (bool + float|None)
             "beyond_cutoff":         obs.get("beyond_cutoff", False),
             "cutoff_price":          obs.get("cutoff_price"),
         }

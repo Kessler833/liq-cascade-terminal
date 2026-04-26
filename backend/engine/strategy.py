@@ -135,15 +135,23 @@ class Strategy:
         """Update the live candle from a multi-exchange trade tick.
 
         CONTRACT:
-        - Only processes ticks for the active symbol.
+        - Always writes sym_price[event_sym] so ImpactRecorder can read
+          the correct mid-price per symbol for multi-symbol observations.
+        - Only processes candle/broadcast updates for the active symbol.
         - NEVER creates a new candle.
         - NEVER touches the candle open.
         - Skips candles marked as closed (phantom wick guard).
         - Rejects ticks deviating >1.5% from last known price (spike guard).
         """
+        if price <= 0:
+            return
+
+        # Always track per-symbol live price for the ImpactRecorder.
+        self._s.sym_price[event_sym] = price
+
         if event_sym != self._s.symbol:
             return
-        if price <= 0 or not self._s.candles:
+        if not self._s.candles:
             return
 
         bt = self._candle_bucket(ts_ms)
@@ -159,7 +167,6 @@ class Strategy:
         # known price. Guards against stale/erroneous ticks from non-Binance
         # exchanges. Binance kline x=true always overwrites with authoritative
         # OHLCV on close, so legitimate fast moves are unaffected.
-        # Nudge threshold to 2% for highly volatile assets (SUI, DOGE) if needed.
         if self._s.price > 0 and abs(price - self._s.price) / self._s.price > 0.015:
             return
 
@@ -200,6 +207,9 @@ class Strategy:
             sb = {"t": bt1m, "delta": 0.0}
             s.delta_store[event_sym].append(sb)
         sb["delta"] += vol_delta
+
+        # Always update per-symbol cumulative delta for the ImpactRecorder.
+        s.sym_delta[event_sym] = s.sym_delta.get(event_sym, 0.0) + vol_delta
 
         # Live display and phase logic only for the active symbol.
         if event_sym != s.symbol:
@@ -247,9 +257,6 @@ class Strategy:
         event_sym: str,   # canonical symbol key e.g. "BTC"
     ):
         # FIX Bug-9: raise minimum from $100 to $1,000.
-        # Events below $1k are exchange-side micro-noise; they would never
-        # reach ImpactRecorder's MIN_LIQ_USD = $100k gate and only pollute
-        # the feed, liq_bars, stats and cascade_score.
         if usd_val < MIN_LIQ_USD:
             return
         s = self._s
@@ -287,7 +294,6 @@ class Strategy:
             lb["short_usd"] += usd_val
 
         # FIX: rolling 60s window instead of hard-reset bucket.
-        # Evict entries older than 60s, append current event, then sum the window.
         now_s = time.time()
         self._liq_window.append((now_s, usd_val))
         while self._liq_window and self._liq_window[0][0] < now_s - _LIQ_WINDOW_S:
@@ -364,10 +370,6 @@ class Strategy:
     async def _cascade_timeout(self):
         await asyncio.sleep(30)
         s = self._s
-        # FIX: always reset cascade_score when the 30s timer fires, regardless
-        # of current phase. If a delta flip moved phase to "long" or "short"
-        # before the timer expired, the stale score would accumulate into the
-        # next cycle and trigger a false early cascade.
         s.cascade_score = 0.0
         if s.phase == "cascade":
             s.phase = "watching"
@@ -385,12 +387,6 @@ class Strategy:
             old_phase = s.phase
             s.phase = "waiting"
             s.cascade_score = 0.0
-            # FIX Bug-7: do NOT zero s.cumulative_delta / s.prev_cumulative_delta here.
-            # These scalars drive the chart's cum_delta line. Zeroing them causes a
-            # visual spike: the live scalar jumps to 0 while delta_bars still holds
-            # the last real cum_delta value, producing a discontinuity on the next
-            # delta broadcast. The next bar's cum_delta will naturally continue from
-            # wherever the market delta is; no artificial reset is needed.
             self._add_log(f"EXIT {old_phase.upper()} @ {s.price:.1f} (delta flip)", "exit")
             if s.candles:
                 s.candles[-1]["signal"] = "exit"
