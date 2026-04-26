@@ -164,6 +164,15 @@
     <div class="imp-kpi-sep"></div>
     <div class="imp-kpi"><div class="imp-kpi-label">Absorbed by Delta</div><div class="imp-kpi-val cyan" id="imp-kpi-absorbed">0</div></div>
     <div class="imp-filters">
+      <button id="imp-delete-btn" class="imp-delete-btn" aria-label="Delete selected">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14H6L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+          <path d="M9 6V4h6v2"/>
+        </svg>
+        Delete <span id="imp-delete-count">0</span> selected
+      </button>
       <select class="imp-select" id="imp-filter-asset"><option value="All">All Assets</option><option>BTC</option><option>ETH</option><option>SOL</option></select>
       <select class="imp-select" id="imp-filter-side"><option value="All">Both Sides</option><option value="Long">Long LIQ</option><option value="Short">Short LIQ</option></select>
       <select class="imp-select" id="imp-filter-size"><option value="All">Any Size</option><option value="Single">Single Event</option><option value="Multi">Multi Cascade</option></select>
@@ -174,6 +183,7 @@
     <div id="imp-table-wrap">
       <table id="imp-table">
         <thead><tr class="imp-thead">
+          <th class="imp-th imp-th-check"><input type="checkbox" id="imp-chk-all" class="imp-chk" aria-label="Select all"></th>
           <th class="imp-th"></th><th class="imp-th">Time</th><th class="imp-th">Asset</th>
           <th class="imp-th">Side</th><th class="imp-th">Cascade</th><th class="imp-th">Init LIQ</th>
           <th class="imp-th">Total LIQ</th><th class="imp-th">&Delta; at Start</th>
