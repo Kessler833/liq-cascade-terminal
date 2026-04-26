@@ -7,27 +7,34 @@ estimates the terminal price a liquidation would reach.
 Key concepts
 ------------
 * Price buckets  — raw levels are rounded to a per-symbol bucket size
-  (e.g. $10 for BTC, $0.05 for SOL) and summed.  This avoids thousands
-  of micro-levels that would never individually stop a large liquidation.
+  (e.g. $10 for BTC, $0.05 for SOL) and summed.
 * Exchange coverage — each bucket tracks how many exchanges contributed.
-  The *data cutoff price* is the deepest level where every REST-accessible
-  exchange (5 of the 6 — dYdX has no public book API) still contributes.
-  Beyond that price the book thins to a subset of exchanges and is less
-  reliable.
-* beyond_cutoff flag — when the model's terminal price estimate crosses
-  the cutoff, the result carries beyond_cutoff=True and cutoff_price so
-  the frontend can draw a stop-line on the impact chart.
-* Multi-symbol — books for ALL symbols in SYMBOL_MAP are refreshed every
-  REFRESH_S seconds in parallel.  compute_terminal_price takes an explicit
-  sym argument so ImpactRecorder can query the correct book regardless of
-  which symbol is currently displayed in the UI.
+  The data cutoff price is the deepest level where every REST-accessible
+  exchange (5 of 6 — dYdX has no public book API) still contributes.
+* beyond_cutoff flag — when the terminal price estimate crosses the
+  cutoff, the result carries beyond_cutoff=True and cutoff_price.
+* Multi-symbol — books for ALL symbols are refreshed every REFRESH_S
+  seconds in parallel.
 
-Spec algorithm (unchanged from previous fix)
---------------------------------------------
-  total_pressure = LIQ_remaining + delta_current   (additive, not multiplicative)
-  If total_pressure <= 0 -> absorbed, terminal_price = mid.
-  Walk bids  for long  liq (forced sell -> price moves down).
-  Walk asks  for short liq (forced buy  -> price moves up).
+Delta sign convention
+---------------------
+snapshot_delta passed in from ImpactRecorder follows the standard convention:
+    positive = net buying pressure (buyers > sellers this second)
+    negative = net selling pressure (sellers > buyers this second)
+
+For a LONG liquidation (forced sell, price moves down):
+    Buyers absorb the forced sells → positive delta reduces pressure.
+    total_pressure = liq_notional - snapshot_delta
+
+For a SHORT liquidation (forced buy, price moves up):
+    Sellers absorb the forced buys → negative delta reduces pressure.
+    total_pressure = liq_notional + snapshot_delta
+
+Unified:
+    direction = +1 for long, -1 for short
+    total_pressure = liq_notional - direction * snapshot_delta
+
+Absorbed when total_pressure <= 0.
 """
 from __future__ import annotations
 
@@ -43,13 +50,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.l2")
 
-REFRESH_S  = 5.0    # composite book re-fetch interval
-BOOK_DEPTH = 50     # levels per exchange per side
+REFRESH_S  = 5.0
+BOOK_DEPTH = 50
 
-# Number of REST-accessible exchanges (dYdX excluded — no public book API).
 N_BOOK_EXCHANGES = 5
 
-# Per-symbol price bucket size (USD).  Levels are rounded to this grid.
 BUCKET_SIZE: dict[str, float] = {
     "BTC":  10.0,
     "ETH":  1.0,
@@ -62,7 +67,6 @@ BUCKET_SIZE: dict[str, float] = {
 }
 DEFAULT_BUCKET = 1.0
 
-# Per-symbol extrapolation % when composite book is exhausted.
 EXTRAP_PCT: dict[str, float] = {
     "BTC":  0.5,
     "ETH":  0.8,
@@ -149,13 +153,6 @@ def _build_composite(
     sym: str,
     mid: float,
 ) -> tuple[list[tuple[float, float, int]], float | None]:
-    """Merge per-exchange books into a bucketed composite.
-
-    Returns (sorted_levels, data_cutoff_price).
-    sorted_levels — (price, total_usd_notional, n_exchanges) sorted from
-    best price toward worst.
-    data_cutoff_price — deepest price where ALL N_BOOK_EXCHANGES contributed.
-    """
     bucket = BUCKET_SIZE.get(sym, DEFAULT_BUCKET)
     composite: dict[float, dict] = {}
 
@@ -174,8 +171,6 @@ def _build_composite(
         for k in sorted_keys
     ]
 
-    # FIX Bug-2: walk the full book to find the *deepest* fully-covered level.
-    # Old break-on-first-gap logic set cutoff_price too close to mid.
     cutoff_price: float | None = None
     for price, usd, n_ex in sorted_levels:
         if n_ex >= N_BOOK_EXCHANGES:
@@ -185,14 +180,13 @@ def _build_composite(
 
 
 # ---------------------------------------------------------------------------
-# Per-symbol book cache entry
+# Per-symbol book cache
 # ---------------------------------------------------------------------------
 
-_BookSide = list[tuple[float, float, int]]   # (price, usd, n_exchanges)
+_BookSide = list[tuple[float, float, int]]
 
 
 class _SymbolBook:
-    """Cached composite order book for a single symbol."""
     __slots__ = ("bids", "asks", "bid_cutoff", "ask_cutoff")
 
     def __init__(self):
@@ -211,8 +205,6 @@ class L2Model:
         self._s    = app_state
         self._task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=5.0)
-
-        # Per-symbol book cache — keyed by canonical symbol ("BTC", "ETH", ...)
         self._books: dict[str, _SymbolBook] = {}
 
     async def start(self):
@@ -224,19 +216,16 @@ class L2Model:
             await asyncio.gather(self._task, return_exceptions=True)
         await self._http.aclose()
 
-    # ------------------------------------------------------------------
     async def _refresh_loop(self):
         while True:
             await self._fetch_all_symbols()
             await asyncio.sleep(REFRESH_S)
 
     async def _fetch_all_symbols(self):
-        """Refresh composite books for ALL symbols in SYMBOL_MAP in parallel."""
         from engine.state import SYMBOL_MAP
 
         async def _fetch_one(sym: str):
             maps = SYMBOL_MAP.get(sym, {})
-            # Use sym_price if available (live tick), else 0.
             mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
             fetchers = [
@@ -259,7 +248,7 @@ class L2Model:
                 exchange_books.append((ex_name, bids, asks))
 
             if not exchange_books:
-                return  # keep stale book
+                return
 
             bids, bid_cutoff = _build_composite(exchange_books, "long",  sym, mid)
             asks, ask_cutoff = _build_composite(exchange_books, "short", sym, mid)
@@ -275,7 +264,6 @@ class L2Model:
                 sym, len(bids), len(asks), len(exchange_books),
             )
 
-        # Refresh all symbols concurrently.
         await asyncio.gather(
             *[_fetch_one(sym) for sym in SYMBOL_MAP],
             return_exceptions=True,
@@ -285,40 +273,43 @@ class L2Model:
     def compute_terminal_price(
         self,
         liq_notional: float,
-        cum_delta: float,
+        snapshot_delta: float,
         side: str,
         sym: str | None = None,
     ) -> dict:
-        """Walk the composite book for `sym` until total pressure is consumed.
+        """Walk the composite book until effective pressure is consumed.
 
         Parameters
         ----------
-        liq_notional : float  — remaining liquidation notional (USD)
-        cum_delta    : float  — cumulative delta for the symbol being modelled
-        side         : str    — "long" or "short"
-        sym          : str    — canonical symbol key (e.g. "BTC").  Defaults to
-                                self._s.symbol for backwards compatibility.
+        liq_notional   : float — remaining liquidation notional (USD)
+        snapshot_delta : float — current-second net flow
+                                 (positive = buying, negative = selling)
+        side           : str   — "long" (forced sell) or "short" (forced buy)
+        sym            : str   — canonical symbol key e.g. "BTC"
 
-        Returns
-        -------
-        dict with keys:
-            terminal_price  float  — estimated absorption price
-            levels_consumed int    — number of price buckets consumed
-            absorbed        bool   — delta fully neutralised the liq
-            beyond_cutoff   bool   — estimate crossed the data-cutoff line
-            cutoff_price    float | None
+        Total pressure
+        --------------
+        Long liq: buyers counter the forced sells → subtract buying pressure
+            total_pressure = liq_notional - snapshot_delta
+
+        Short liq: sellers counter the forced buys → add selling pressure
+            total_pressure = liq_notional + snapshot_delta
+
+        Unified:
+            direction = +1 for long, -1 for short
+            total_pressure = liq_notional - direction * snapshot_delta
         """
         if sym is None:
             sym = self._s.symbol
 
-        # Use per-symbol live price; fall back to active-symbol price.
         mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
         if mid == 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
                     "beyond_cutoff": False, "cutoff_price": None}
 
-        total_pressure = liq_notional + cum_delta
+        direction      = 1.0 if side == "long" else -1.0
+        total_pressure = liq_notional - direction * snapshot_delta
 
         if total_pressure <= 0:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": True,
@@ -329,8 +320,8 @@ class L2Model:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
                     "beyond_cutoff": False, "cutoff_price": None}
 
-        # long liq = forced sell -> price down -> consume bids
-        # short liq = forced buy  -> price up   -> consume asks
+        # long liq = forced sell → consumes bids (price moves down)
+        # short liq = forced buy  → consumes asks (price moves up)
         book   = book_entry.bids   if side == "long" else book_entry.asks
         cutoff = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
 
@@ -338,9 +329,9 @@ class L2Model:
             return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
                     "beyond_cutoff": False, "cutoff_price": cutoff}
 
-        remaining = total_pressure
-        terminal  = mid
-        consumed  = 0
+        remaining     = total_pressure
+        terminal      = mid
+        consumed      = 0
         beyond_cutoff = False
 
         for price, usd, _n_ex in book:
@@ -367,7 +358,11 @@ class L2Model:
             if cutoff is not None:
                 beyond_cutoff = True
 
-        absorbed = cum_delta < 0 and abs(cum_delta) > liq_notional * 0.5
+        # Absorbed = counter-flow covers more than 50% of liq notional
+        if side == "long":
+            absorbed = snapshot_delta > 0 and snapshot_delta > liq_notional * 0.5
+        else:
+            absorbed = snapshot_delta < 0 and abs(snapshot_delta) > liq_notional * 0.5
 
         return {
             "terminal_price":  round(terminal, 6),
