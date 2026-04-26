@@ -16,14 +16,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.strategy")
 
-# Rolling 60s window for the /m rate display.
-# Each entry is (timestamp_s, usd_val).
 _LIQ_WINDOW_S = 60.0
 
-# FIX Bug-9: minimum per-event liquidation to record in any store/feed.
-# ImpactRecorder uses MIN_LIQ_USD = 100_000. Using a consistent 1_000 here
-# prevents micro-events ($100-$1000) from polluting feed, stats, liq_bars,
-# and cascade_score with noise that would never reach the impact threshold.
 MIN_LIQ_USD = 1_000
 
 
@@ -39,16 +33,19 @@ class Strategy:
         self._broadcast = broadcast
         self._last_tick_ms: int = 0
         self._tick_throttle_ms: int = 100
-        # FIX: rolling deque replaces the hard-reset liq_1m_bucket.
-        # Each entry is (wall_time_s, usd_val). Entries older than 60s are
-        # evicted on every liquidation, so the window is always current.
         self._liq_window: deque[tuple[float, float]] = deque()
+
+        # Per-symbol current-second delta tracking.
+        # _second_ts holds the last seen wall-clock second (ts_ms // 1000)
+        # per symbol. When it advances, _second_delta resets to 0 before
+        # accumulating the new tick — giving a clean per-second snapshot.
+        self._second_ts:    dict[str, int]   = {}
+        self._second_delta: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     def _candle_bucket(self, ts_ms: int) -> int:
-        """Return the candle open-time (ms) that ts_ms falls into."""
         candles = self._s.candles
         if not candles:
             from engine.state import TF_MINUTES
@@ -102,9 +99,6 @@ class Strategy:
             if db is None:
                 db = {"t": t, "delta": 0.0, "cum_delta": 0.0}
                 self._s.delta_bars.append(db)
-            # FIX: use assignment (=) not augmented assignment (+=).
-            # apply_delta_store rebuilds delta_bars from scratch after a
-            # history re-fetch, so += would double-count on repeated calls.
             db["delta"] = grouped[t]
             db["cum_delta"] = cum
         self._s.delta_bars.sort(key=lambda b: b["t"])
@@ -113,7 +107,6 @@ class Strategy:
             self._s.prev_cumulative_delta = cum
 
     def update_candle(self, c: dict, is_closed: bool):
-        """Create or update a candle. Called by kline handler only."""
         from engine.state import MAX_CANDLES
         existing = next((x for x in self._s.candles if x["t"] == c["t"]), None)
         if existing:
@@ -129,24 +122,12 @@ class Strategy:
             self._s.delta_bars.append({"t": c["t"], "delta": 0.0, "cum_delta": self._s.cumulative_delta})
 
     # ------------------------------------------------------------------
-    # Price tick — called by ALL exchange trade handlers
+    # Price tick
     # ------------------------------------------------------------------
     async def update_price_tick(self, price: float, notional: float, ts_ms: int, event_sym: str):
-        """Update the live candle from a multi-exchange trade tick.
-
-        CONTRACT:
-        - Always writes sym_price[event_sym] so ImpactRecorder can read
-          the correct mid-price per symbol for multi-symbol observations.
-        - Only processes candle/broadcast updates for the active symbol.
-        - NEVER creates a new candle.
-        - NEVER touches the candle open.
-        - Skips candles marked as closed (phantom wick guard).
-        - Rejects ticks deviating >1.5% from last known price (spike guard).
-        """
         if price <= 0:
             return
 
-        # Always track per-symbol live price for the ImpactRecorder.
         self._s.sym_price[event_sym] = price
 
         if event_sym != self._s.symbol:
@@ -159,18 +140,12 @@ class Strategy:
         if cb is None:
             return
 
-        # Phantom wick guard: don't update a candle already closed by kline x=true.
         if cb.get("closed"):
             return
 
-        # Spike guard: reject ticks that deviate more than 1.5% from the last
-        # known price. Guards against stale/erroneous ticks from non-Binance
-        # exchanges. Binance kline x=true always overwrites with authoritative
-        # OHLCV on close, so legitimate fast moves are unaffected.
         if self._s.price > 0 and abs(price - self._s.price) / self._s.price > 0.015:
             return
 
-        # Update close, high, low, volume — open is NEVER touched.
         cb["c"] = price
         if price > cb["h"]:
             cb["h"] = price
@@ -200,7 +175,18 @@ class Strategy:
             return
         s = self._s
 
-        # Always persist to delta_store for this symbol — survives symbol switches.
+        # ---- Per-second snapshot delta (all exchanges, all symbols) ----
+        # Resets each time the wall-clock second advances for this symbol.
+        # This is what ImpactRecorder reads at liquidation time — a true
+        # instantaneous snapshot of buy/sell pressure in this exact second.
+        current_second = ts_ms // 1000
+        if self._second_ts.get(event_sym) != current_second:
+            self._second_ts[event_sym]    = current_second
+            self._second_delta[event_sym] = 0.0
+        self._second_delta[event_sym] = self._second_delta.get(event_sym, 0.0) + vol_delta
+        s.sym_snapshot_delta[event_sym] = self._second_delta[event_sym]
+
+        # ---- Persist to delta_store at 1m resolution (for chart rebucketing) ----
         bt1m = (ts_ms // 60_000) * 60_000
         sb = next((b for b in s.delta_store[event_sym] if b["t"] == bt1m), None)
         if sb is None:
@@ -208,10 +194,7 @@ class Strategy:
             s.delta_store[event_sym].append(sb)
         sb["delta"] += vol_delta
 
-        # Always update per-symbol cumulative delta for the ImpactRecorder.
-        s.sym_delta[event_sym] = s.sym_delta.get(event_sym, 0.0) + vol_delta
-
-        # Live display and phase logic only for the active symbol.
+        # ---- Active-symbol live chart + phase FSM ----
         if event_sym != s.symbol:
             return
 
@@ -238,10 +221,10 @@ class Strategy:
         s.prev_cumulative_delta = cur
 
         await self._broadcast({
-            "type": "delta",
+            "type":      "delta",
             "cum_delta": s.cumulative_delta,
             "bar_delta": db["delta"],
-            "ts": ts_ms,
+            "ts":        ts_ms,
         })
 
     # ------------------------------------------------------------------
@@ -254,22 +237,18 @@ class Strategy:
         usd_val: float,
         price: float,
         symbol: str,
-        event_sym: str,   # canonical symbol key e.g. "BTC"
+        event_sym: str,
     ):
-        # FIX Bug-9: raise minimum from $100 to $1,000.
         if usd_val < MIN_LIQ_USD:
             return
         s = self._s
         now_ms = int(time.time() * 1000)
 
-        # Always persist under the event's own symbol — captured for all symbols
-        # regardless of which is currently displayed.
         s.liq_store[event_sym].append({
             "t": now_ms, "exchange": exchange,
             "side": side, "usd_val": usd_val, "price": price,
         })
 
-        # Display updates only for the active symbol.
         if event_sym != s.symbol:
             return
 
@@ -293,7 +272,6 @@ class Strategy:
         else:
             lb["short_usd"] += usd_val
 
-        # FIX: rolling 60s window instead of hard-reset bucket.
         now_s = time.time()
         self._liq_window.append((now_s, usd_val))
         while self._liq_window and self._liq_window[0][0] < now_s - _LIQ_WINDOW_S:
