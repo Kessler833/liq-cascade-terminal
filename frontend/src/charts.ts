@@ -93,6 +93,22 @@ export function updatePriceChart(candles: Candle[]) {
   (candleSeries as any).setMarkers(markers);
 }
 
+/**
+ * O(1) single-bar update for live tick data.
+ * Use instead of updatePriceChart() on every trade tick to avoid
+ * rebuilding the entire series on each message.
+ */
+export function updateLastBar(candle: Candle) {
+  if (!candleSeries) return;
+  candleSeries.update({
+    time:  (candle.t / 1000) as any,
+    open:  candle.o,
+    high:  candle.h,
+    low:   candle.l,
+    close: candle.c,
+  });
+}
+
 // ---- Liq chart ----------------------------------------------------------
 let liqChart:       IChartApi | null = null;
 let liqLongSeries:  ISeriesApi<'Histogram'> | null = null;
