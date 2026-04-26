@@ -208,6 +208,16 @@
         <option value="Recording">Recording</option>
         <option value="Complete">Complete</option>
       </select>
+      <!-- Delete selected button (hidden until rows are checked) -->
+      <button id="imp-delete-btn" title="Delete selected observations">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+        </svg>
+        Delete <span id="imp-delete-count">0</span>
+      </button>
     </div>
   </div>
 
@@ -219,6 +229,7 @@
       <table id="imp-table">
         <thead>
           <tr class="imp-thead">
+            <th class="imp-th imp-th-check"><input type="checkbox" id="imp-chk-all" title="Select all on this page"></th>
             <th class="imp-th"></th>
             <th class="imp-th">Time</th>
             <th class="imp-th">Asset</th>
