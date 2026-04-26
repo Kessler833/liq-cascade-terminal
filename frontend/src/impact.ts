@@ -118,7 +118,6 @@ function renderTable(): void {
       hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
 
-    // Status cell: recording dot + optional CUTOFF badge
     const cutoffBadge = (isRec && obs.beyond_cutoff)
       ? ' <span class="imp-badge amber" title="Terminal price estimate crossed book depth cutoff — fewer exchanges contributing">CUTOFF</span>'
       : '';
@@ -146,12 +145,8 @@ function renderTable(): void {
 
 // ---- detail panel ----
 
-// FIX Bug-2: defer chart rendering until after the CSS panel-open transition
-// completes. #imp-detail transitions from width:0 → its full width over ~220ms.
-// If renderDetailCharts runs before layout is resolved, Chart.js measures a
-// zero-width canvas and produces invisible charts. A 250ms timeout clears the
-// transition before Chart.js calls getBoundingClientRect.
-const PANEL_OPEN_DELAY_MS = 250;
+// Defer chart render until after the CSS panel-open height transition (~220ms).
+const PANEL_OPEN_DELAY_MS = 280;
 
 function openDetail(id: string): void {
   if (_selectedId === id) { closeDetail(); return; }
@@ -168,9 +163,8 @@ function openDetail(id: string): void {
   fillDetailHeader(obs);
   renderCutoffBanner(obs);
 
-  // Defer chart render until the panel slide-open transition has finished.
+  // Defer until height transition completes so Chart.js can measure canvas dimensions.
   setTimeout(() => {
-    // Guard: user may have closed the panel before the timer fires.
     if (_selectedId !== id) return;
     const current = _allObs.find(o => o.id === _selectedId);
     if (current) renderDetailCharts(current);
@@ -182,7 +176,6 @@ function closeDetail(): void {
   document.getElementById('imp-detail')?.classList.remove('open');
   document.querySelectorAll('.imp-row').forEach(r => r.classList.remove('active'));
   destroyCharts();
-  // Hide banner on close
   const banner = document.getElementById('imp-cutoff-banner');
   if (banner) banner.style.display = 'none';
 }
@@ -204,12 +197,8 @@ function fillDetailHeader(obs: ImpactObs): void {
 }
 
 // ---- cutoff banner ----
-// Shows a pulsing amber warning in the detail panel when the prediction
-// has walked past the depth level where all exchanges still contribute.
 
 function renderCutoffBanner(obs: ImpactObs): void {
-  // Lazily create the banner element if it doesn't exist yet.
-  // It is inserted as the first child of #imp-detail.
   let banner = document.getElementById('imp-cutoff-banner');
   if (!banner) {
     banner = document.createElement('div');
@@ -218,18 +207,16 @@ function renderCutoffBanner(obs: ImpactObs): void {
       'display:none',
       'align-items:center',
       'gap:8px',
-      'padding:8px 14px',
+      'padding:6px 14px',
       'background:rgba(255,157,0,0.10)',
-      'border:1px solid rgba(255,157,0,0.35)',
-      'border-radius:6px',
-      'margin:0 0 10px 0',
+      'border-bottom:1px solid rgba(255,157,0,0.35)',
       'font-size:11px',
       'color:#ffa040',
       'font-family:monospace',
       'animation:imp-cutoff-pulse 1.6s ease-in-out infinite',
+      'flex-shrink:0',
     ].join(';');
 
-    // Inject keyframes once
     if (!document.getElementById('imp-cutoff-keyframes')) {
       const style = document.createElement('style');
       style.id = 'imp-cutoff-keyframes';
@@ -253,12 +240,11 @@ function renderCutoffBanner(obs: ImpactObs): void {
       document.head.appendChild(style);
     }
 
-    const detail = document.getElementById('imp-detail');
-    if (detail) detail.prepend(banner);
+    const header = document.getElementById('imp-detail-header');
+    if (header) header.insertAdjacentElement('afterend', banner);
   }
 
   if (obs.beyond_cutoff && obs.label_filled === 0) {
-    // Active recording that is beyond cutoff — show the warning.
     const priceStr = obs.cutoff_price != null ? fmtPrice(obs.cutoff_price) : 'unknown';
     banner.innerHTML = `
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffa040" stroke-width="2" style="flex-shrink:0">
@@ -279,58 +265,69 @@ function renderCutoffBanner(obs: ImpactObs): void {
 
 // ---- detail charts ----
 
+/** Destroy existing Chart.js instances and clear the canvas pixels. */
 function destroyCharts(): void {
   for (const c of Object.values(_charts)) c?.destroy?.();
   _charts = {};
+  // Explicitly clear each canvas so stale pixels don't show through the next render.
+  for (const id of ['imp-chart-delta', 'imp-chart-expected', 'imp-chart-price', 'imp-chart-tank']) {
+    const canvas = document.getElementById(id) as HTMLCanvasElement | null;
+    if (canvas) {
+      const c2d = canvas.getContext('2d');
+      if (c2d) c2d.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+}
+
+/**
+ * Get a canvas element by ID.
+ * NOTE: Chart.js v4 should receive the canvas element, NOT a 2D context.
+ * Passing a CanvasRenderingContext2D was valid in v3 but causes sizing bugs
+ * in v4 because the library no longer reads dimensions from the context.
+ */
+function getCanvas(id: string): HTMLCanvasElement | null {
+  return document.getElementById(id) as HTMLCanvasElement | null;
 }
 
 function renderDetailCharts(obs: ImpactObs): void {
   if (typeof Chart === 'undefined') return;
   destroyCharts();
 
-  const origin         = obs.timestamp;
-  const cascadeEvents  = obs.cascade_events ?? [];
+  const origin        = obs.timestamp;
+  const cascadeEvents = obs.cascade_events ?? [];
 
   // ---- Chart 1: Volume Delta ----
   const deltaSeries = obs.delta_series;
   if (deltaSeries && deltaSeries.length > 1) {
     const labels = elapsedLabels(deltaSeries, origin);
     const data   = deltaSeries.map(([, v]) => v);
-    const canvasCtx = ctx('imp-chart-delta');
-    if (canvasCtx) {
-      _charts.delta = new Chart(
-        canvasCtx,
-        {
-          type: 'line',
-          data: {
-            labels,
-            datasets: [
-              {
-                data,
-                borderWidth: 1.5,
-                pointRadius: 0,
-                tension: 0.3,
-                fill: { target: { value: 0 }, above: 'rgba(255,61,90,0.07)', below: 'rgba(0,230,118,0.07)' },
-                segment: {
-                  borderColor: (c: any) => c.p0.parsed.y <= 0 ? 'rgba(0,230,118,0.8)' : 'rgba(255,61,90,0.8)',
-                },
+    const canvas = getCanvas('imp-chart-delta');
+    if (canvas) {
+      _charts.delta = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              data,
+              borderWidth: 1.5,
+              pointRadius: 0,
+              tension: 0.3,
+              fill: { target: { value: 0 }, above: 'rgba(255,61,90,0.07)', below: 'rgba(0,230,118,0.07)' },
+              segment: {
+                borderColor: (c: any) => c.p0.parsed.y <= 0 ? 'rgba(0,230,118,0.8)' : 'rgba(255,61,90,0.8)',
               },
-              refLine(labels, 0, 'rgba(122,132,153,0.3)', ''),
-              ...cascadeAnnotations(cascadeEvents, deltaSeries, origin),
-            ],
-          },
-          options: chartOpts('Delta (USD)', fmtUSD),
-        }
-      );
+            },
+            refLine(labels, 0, 'rgba(122,132,153,0.3)'),
+            ...cascadeAnnotations(cascadeEvents, deltaSeries, origin),
+          ],
+        },
+        options: chartOpts('Delta (USD)', fmtUSD),
+      });
     }
   }
 
   // ---- Chart 2: Predicted Terminal Price ----
-  // Includes:
-  //   - amber dashed horizontal line at cutoff_price ("stop line")
-  //   - amber shaded region + vertical dashed line at the crossing tick
-  //     rendered by the cutoffRegion inline plugin (Bug-3 fix: plugin is now
-  //     correctly passed to the Chart constructor via the plugins array).
   const expSeries = obs.expected_price_series;
   if (expSeries && expSeries.length > 1) {
     const labels        = elapsedLabels(expSeries, origin);
@@ -339,19 +336,12 @@ function renderDetailCharts(obs: ImpactObs): void {
 
     const cutoffDatasets: object[] = [];
     if (obs.cutoff_price != null) {
-      // Horizontal stop-line at cutoff_price
-      cutoffDatasets.push(
-        refLine(labels, obs.cutoff_price, 'rgba(255,157,0,0.75)', 'Book depth limit')
-      );
-
-      // Vertical marker at the first tick that crossed the cutoff.
+      cutoffDatasets.push(refLine(labels, obs.cutoff_price, 'rgba(255,157,0,0.75)'));
       const crossIdx = data.findIndex(v =>
         obs.side === 'long' ? v < obs.cutoff_price! : v > obs.cutoff_price!
       );
       if (crossIdx >= 0) {
-        const crossPointData = labels.map((_, i) =>
-          i === crossIdx ? obs.cutoff_price : null
-        );
+        const crossPointData = labels.map((_, i) => i === crossIdx ? obs.cutoff_price : null);
         cutoffDatasets.push({
           type: 'scatter',
           label: 'Cutoff crossed',
@@ -367,43 +357,31 @@ function renderDetailCharts(obs: ImpactObs): void {
       }
     }
 
-    const canvasCtx = ctx('imp-chart-expected');
-    if (canvasCtx) {
-      // FIX Bug-3: read the cutoffRegion plugin off the opts object and pass it
-      // to the Chart constructor as a per-instance plugin in the plugins array.
-      // Previously _cutoffPlugin was stored as a dangling property on opts but
-      // never forwarded to Chart(), so the shaded region was never drawn.
-      const opts = chartOptsWithCutoffPlugin(
-        'Predicted price',
-        fmtPrice,
-        obs.cutoff_price,
-        labels,
-      ) as any;
+    const canvas = getCanvas('imp-chart-expected');
+    if (canvas) {
+      const opts = chartOptsWithCutoffPlugin('Predicted price', fmtPrice, obs.cutoff_price, labels) as any;
       const instancePlugins: object[] = [];
       if (opts._cutoffPlugin) {
         instancePlugins.push(opts._cutoffPlugin);
         delete opts._cutoffPlugin;
       }
-      _charts.expected = new Chart(
-        canvasCtx,
-        {
-          type: 'line',
-          data: {
-            labels,
-            datasets: [
-              { data, borderColor: sideLineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-              refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
-              ...(obs.actual_terminal_price != null
-                ? [refLine(labels, obs.actual_terminal_price, 'rgba(0,230,118,0.55)', 'Actual')]
-                : []),
-              ...cutoffDatasets,
-              ...cascadeAnnotations(cascadeEvents, expSeries, origin),
-            ],
-          },
-          options: opts,
-          plugins: instancePlugins,
-        }
-      );
+      _charts.expected = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { data, borderColor: sideLineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
+            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)'),
+            ...(obs.actual_terminal_price != null
+              ? [refLine(labels, obs.actual_terminal_price, 'rgba(0,230,118,0.55)')]
+              : []),
+            ...cutoffDatasets,
+            ...cascadeAnnotations(cascadeEvents, expSeries, origin),
+          ],
+        },
+        options: opts,
+        plugins: instancePlugins,
+      });
     }
   }
 
@@ -412,53 +390,47 @@ function renderDetailCharts(obs: ImpactObs): void {
   if (priceSeries && priceSeries.length > 1) {
     const labels = elapsedLabels(priceSeries, origin);
     const data   = priceSeries.map(([, v]) => v);
-    const canvasCtx = ctx('imp-chart-price');
-    if (canvasCtx) {
-      _charts.price = new Chart(
-        canvasCtx,
-        {
-          type: 'line',
-          data: {
-            labels,
-            datasets: [
-              { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-              refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)', 'Entry'),
-              ...(obs.final_expected_price != null
-                ? [refLine(labels, obs.final_expected_price, 'rgba(255,157,0,0.6)', 'Model stop')]
-                : []),
-              ...cascadeAnnotations(cascadeEvents, priceSeries, origin),
-            ],
-          },
-          options: chartOpts('Price', fmtPrice),
-        }
-      );
+    const canvas = getCanvas('imp-chart-price');
+    if (canvas) {
+      _charts.price = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
+            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)'),
+            ...(obs.final_expected_price != null
+              ? [refLine(labels, obs.final_expected_price, 'rgba(255,157,0,0.6)')]
+              : []),
+            ...cascadeAnnotations(cascadeEvents, priceSeries, origin),
+          ],
+        },
+        options: chartOpts('Price', fmtPrice),
+      });
     }
   }
 
-  // ---- Chart 4: LIQ Remaining (depleting tank) ----
+  // ---- Chart 4: LIQ Remaining ----
   const liqSeries = obs.liq_remaining_series;
   if (liqSeries && liqSeries.length > 1) {
     const labels    = elapsedLabels(liqSeries, origin);
     const data      = liqSeries.map(([, v]) => v);
     const fillColor = obs.side === 'long' ? 'rgba(255,61,90,0.18)' : 'rgba(0,230,118,0.18)';
     const lineColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)'  : 'rgba(0,230,118,0.85)';
-    const canvasCtx = ctx('imp-chart-tank');
-    if (canvasCtx) {
-      _charts.tank = new Chart(
-        canvasCtx,
-        {
-          type: 'line',
-          data: {
-            labels,
-            datasets: [
-              { data, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: 'origin', backgroundColor: fillColor },
-              refLine(labels, 0, 'rgba(122,132,153,0.35)', 'Exhausted'),
-              ...cascadeAnnotations(cascadeEvents, liqSeries, origin),
-            ],
-          },
-          options: chartOpts('LIQ remaining (USD)', fmtUSD),
-        }
-      );
+    const canvas = getCanvas('imp-chart-tank');
+    if (canvas) {
+      _charts.tank = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { data, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: 'origin', backgroundColor: fillColor },
+            refLine(labels, 0, 'rgba(122,132,153,0.35)'),
+            ...cascadeAnnotations(cascadeEvents, liqSeries, origin),
+          ],
+        },
+        options: chartOpts('LIQ remaining (USD)', fmtUSD),
+      });
     }
   }
 }
@@ -477,9 +449,7 @@ function cascadeAnnotations(
   origin: number,
 ): object[] {
   if (events.length <= 1 || series.length === 0) return [];
-
   const labels = elapsedLabels(series, origin);
-
   return events.slice(1).map(([ts, vol]) => {
     const elapsed = ((ts - origin) / 1000).toFixed(1) + 's';
     const idx = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
@@ -500,7 +470,7 @@ function cascadeAnnotations(
   });
 }
 
-function refLine(labels: string[], value: number, color: string, _label: string): object {
+function refLine(labels: string[], value: number, color: string): object {
   return {
     data: labels.map(() => value),
     borderColor: color,
@@ -531,7 +501,7 @@ function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
     },
     scales: {
       x: {
-        ticks: { color: '#3d4455', font: { size: 9 }, maxTicksLimit: 8, maxRotation: 0 },
+        ticks: { color: '#3d4455', font: { size: 9 }, maxTicksLimit: 6, maxRotation: 0 },
         grid: { color: '#1a1e2a' },
       },
       y: {
@@ -542,15 +512,6 @@ function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
   };
 }
 
-/**
- * Extended chart options for the predicted-price chart.
- * Adds an afterDraw plugin that renders a labelled vertical amber line
- * at the cutoff crossing tick, plus a shaded "beyond-cutoff" region.
- *
- * FIX Bug-3: the plugin is stored on `_cutoffPlugin` and must be passed
- * to `new Chart(ctx, config, [plugin])` by the caller — it is NOT
- * auto-registered here. renderDetailCharts reads and passes it correctly.
- */
 function chartOptsWithCutoffPlugin(
   yLabel: string,
   tickFmt: (v: number) => string,
@@ -558,7 +519,6 @@ function chartOptsWithCutoffPlugin(
   labels: string[],
 ): object {
   const base = chartOpts(yLabel, tickFmt) as any;
-
   if (cutoffPrice == null) return base;
 
   base._cutoffPlugin = {
@@ -575,8 +535,7 @@ function chartOptsWithCutoffPlugin(
       for (let i = 0; i < vals.length; i++) {
         const v = vals[i];
         if (v == null) continue;
-        if (v < cutoffPrice) { crossIdx = i; break; }
-        if (v > cutoffPrice) { crossIdx = i; break; }
+        if (v < cutoffPrice || v > cutoffPrice) { crossIdx = i; break; }
       }
       if (crossIdx < 0 || crossIdx >= labels.length) return;
 
@@ -588,7 +547,6 @@ function chartOptsWithCutoffPlugin(
       c.save();
       c.fillStyle = 'rgba(255,157,0,0.06)';
       c.fillRect(xPos, top, right - xPos, bot - top);
-
       c.setLineDash([4, 4]);
       c.strokeStyle = 'rgba(255,157,0,0.7)';
       c.lineWidth = 1.5;
@@ -596,25 +554,16 @@ function chartOptsWithCutoffPlugin(
       c.moveTo(xPos, top);
       c.lineTo(xPos, bot);
       c.stroke();
-
       c.setLineDash([]);
       c.fillStyle = 'rgba(255,157,0,0.9)';
       c.font = '9px monospace';
       c.textAlign = 'left';
       c.fillText('Book depth limit', xPos + 4, top + 12);
-
       c.restore();
     },
   };
 
   return base;
-}
-
-// FIX: replaced non-null assertion `!` with a null check.
-function ctx(id: string): CanvasRenderingContext2D | null {
-  const canvas = document.getElementById(id) as HTMLCanvasElement | null;
-  if (!canvas) return null;
-  return canvas.getContext('2d');
 }
 
 // ---- misc helpers ----
