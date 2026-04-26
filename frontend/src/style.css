@@ -481,10 +481,12 @@ body { display: flex; flex-direction: column; }
 }
 .imp-select:focus { border-color: var(--accent2); }
 
-#imp-body { flex: 1; display: flex; flex-direction: row; min-height: 0; overflow: hidden; }
+/* ---- Impact body: column layout — table on top, detail slides up from bottom ---- */
+#imp-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
 #imp-table-wrap {
-  flex: 1; display: flex; flex-direction: column; min-height: 0;
-  overflow-y: auto; border-right: 1px solid var(--border);
+  flex: 1 1 0; display: flex; flex-direction: column; min-height: 0;
+  overflow-y: auto; border-bottom: 1px solid var(--border);
 }
 #imp-table { width: 100%; border-collapse: collapse; flex-shrink: 0; }
 .imp-thead { background: var(--surface2); position: sticky; top: 0; z-index: 5; }
@@ -524,14 +526,16 @@ body { display: flex; flex-direction: column; }
 .imp-badge.red    { background: rgba(255,61,90,.15);   color: var(--red); }
 .imp-badge.cyan   { background: rgba(0,212,255,.15);   color: var(--cyan); }
 
+/* ---- Detail panel: slides up from bottom ---- */
 #imp-detail {
-  width: 0; min-width: 0; overflow: hidden;
+  width: 100%; min-width: 0;
+  height: 0; overflow: hidden;
   display: flex; flex-direction: column;
-  background: var(--surface); border-left: 1px solid var(--border);
-  transition: width 0.22s cubic-bezier(0.16,1,0.3,1), min-width 0.22s cubic-bezier(0.16,1,0.3,1);
+  background: var(--surface); border-top: 1px solid var(--border);
+  transition: height 0.22s cubic-bezier(0.16,1,0.3,1);
   flex-shrink: 0;
 }
-#imp-detail.open { width: 560px; min-width: 560px; }
+#imp-detail.open { height: 390px; }
 
 #imp-detail-header {
   display: flex; align-items: center; gap: 14px;
@@ -551,23 +555,32 @@ body { display: flex; flex-direction: column; }
 }
 .imp-close-btn:hover { color: var(--text); background: var(--border); }
 
+/* 4 charts in a single row when detail is at the bottom */
 #imp-charts-grid {
   flex: 1; display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: 1fr;
   gap: 1px; background: var(--border);
   overflow: hidden; min-height: 0;
 }
 .imp-chart-cell {
   background: var(--bg); display: flex; flex-direction: column;
-  padding: 10px 12px 8px; min-height: 0;
+  padding: 8px 10px 6px; min-height: 0; min-width: 0;
 }
 .imp-chart-label {
   font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
-  color: var(--text-faint); margin-bottom: 6px; flex-shrink: 0;
+  color: var(--text-faint); margin-bottom: 4px; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.imp-chart-wrap { flex: 1; position: relative; min-height: 0; }
-.imp-chart-wrap canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+/* Chart.js canvas container — explicit height so Chart.js can measure it */
+.imp-chart-wrap {
+  flex: 1; position: relative;
+  min-height: 0; height: 100%;
+}
+.imp-chart-wrap canvas {
+  position: absolute; inset: 0;
+  width: 100% !important; height: 100% !important;
+}
 
 #imp-empty-state {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
