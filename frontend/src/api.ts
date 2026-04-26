@@ -49,11 +49,21 @@ async function post(path: string, body: object) {
   return r.json();
 }
 
+async function del(path: string, body: object) {
+  const r = await fetch(path, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
 export const api = {
-  setSymbol:    (symbol: string)    => post('/api/symbol',    { symbol }),
-  setTimeframe: (timeframe: string) => post('/api/timeframe', { timeframe }),
-  getState:     ()                  => fetch('/api/state').then(r => r.json()),
-  getImpact:    ()                  => fetch('/api/impact').then(r => r.json()),
+  setSymbol:     (symbol: string)    => post('/api/symbol',    { symbol }),
+  setTimeframe:  (timeframe: string) => post('/api/timeframe', { timeframe }),
+  getState:      ()                  => fetch('/api/state').then(r => r.json()),
+  getImpact:     ()                  => fetch('/api/impact').then(r => r.json()),
+  deleteImpact:  (ids: string[])     => del('/api/impact',     { ids }),
   // before: endTime in ms for lazy-load pagination; omit for latest 500 candles
   fetchHistory: (sym: string, tf: string, before = 0) => {
     const params = new URLSearchParams({ sym, tf, limit: '500' });

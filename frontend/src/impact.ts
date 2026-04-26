@@ -5,6 +5,7 @@
 
 import type { ImpactObs, ImpactStats } from './state';
 import { fmtUSD, fmtPrice, fmtPct, el } from './utils';
+import { api } from './api';
 
 declare const Chart: any;
 
@@ -109,14 +110,27 @@ function syncDeleteBtn(): void {
   }
 }
 
-function deleteSelected(): void {
+async function deleteSelected(): Promise<void> {
   if (_checkedIds.size === 0) return;
+
+  const ids = [..._checkedIds];
+
+  // Optimistic: remove from local view immediately so the UI feels instant
   _allObs = _allObs.filter(o => !_checkedIds.has(o.id));
   if (_selectedId && _checkedIds.has(_selectedId)) closeDetail();
   _checkedIds.clear();
   renderStats();
   renderTable();
   syncDeleteBtn();
+
+  // Persist to backend — fire and forget (WS broadcast will confirm)
+  try {
+    await api.deleteImpact(ids);
+  } catch (err) {
+    console.error('[impact] deleteImpact API call failed:', err);
+    // The WS impact_update that follows the backend delete will
+    // re-sync state automatically. No manual rollback needed.
+  }
 }
 
 // ---- stats bar ----

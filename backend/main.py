@@ -8,6 +8,7 @@ Exposes:
   GET /api/impact          — impact observations
   POST /api/symbol         — {symbol: "ETH"}  (hot-swap symbol; no WS reconnect)
   POST /api/timeframe      — {timeframe: "1h"} (hot-swap timeframe; no WS reconnect)
+  DELETE /api/impact       — {ids: ["abc123", ...]}  (delete observations from DB)
   GET /healthz             — liveness probe
 
 DB changes vs. original (all marked  # DB):
@@ -242,6 +243,29 @@ async def get_impact():
     if conn_mgr is None:
         return {"observations": [], "stats": {"total": 0, "recording": 0, "avg_err": None, "absorbed": 0}}
     return _build_impact_snapshot()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/impact  — permanently remove observations by ID
+# ---------------------------------------------------------------------------
+
+class DeleteImpactRequest(BaseModel):
+    ids: list[str]
+
+
+@app.delete("/api/impact")
+async def delete_impact(req: DeleteImpactRequest):
+    """Permanently delete impact observations from memory and the SQLite DB.
+
+    Body: { "ids": ["abc123def", ...] }
+    Returns: { "ok": true, "deleted": <count> }
+    """
+    if conn_mgr is None:
+        return {"ok": False, "error": "backend not ready"}
+    if not req.ids:
+        return {"ok": True, "deleted": 0}
+    removed = await conn_mgr.impact.delete_observations(req.ids)
+    return {"ok": True, "deleted": removed}
 
 
 class SymbolRequest(BaseModel):

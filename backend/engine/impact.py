@@ -182,6 +182,47 @@ class ImpactRecorder:
     def _persist_obs(self, obs: dict) -> None:
         _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
+    # ---------------------------------------------------------------------------
+    # delete_observations — remove by ID from memory + DB, broadcast update
+    # ---------------------------------------------------------------------------
+
+    async def delete_observations(self, ids: list[str]) -> int:
+        """Delete observations by obs_id from in-memory store and SQLite.
+
+        Returns the number of observations actually removed.
+        Active (still-recording) observations whose ID matches are also evicted.
+        """
+        if not ids:
+            return 0
+
+        id_set = set(ids)
+
+        # Remove from completed observations list
+        before = len(self.observations)
+        self.observations = [o for o in self.observations if o["id"] not in id_set]
+        removed = before - len(self.observations)
+
+        # Also evict any matching active observations
+        for sym in list(self.active):
+            if self.active[sym]["id"] in id_set:
+                del self.active[sym]
+                removed += 1
+
+        # Persist: delete from SQLite using a parameterised IN clause.
+        # SQLite doesn't support array binding, so we build the placeholders.
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            await _db.execute(
+                f"DELETE FROM cascade_observations WHERE obs_id IN ({placeholders})",
+                tuple(ids),
+            )
+
+        if removed:
+            await self._broadcast_table_update()
+            log.info("Deleted %d observation(s): %s", removed, ids)
+
+        return removed
+
     # ------------------------------------------------------------------
     # on_liquidation
     # ------------------------------------------------------------------
