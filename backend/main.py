@@ -119,8 +119,13 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     hub.add(ws)
     log.info(f"WS client connected ({hub.count} total)")
-    # Send immediate snapshot
+    # Send immediate snapshot (terminal state)
     await ws.send_text(json.dumps(_build_snapshot()))
+    # FIX: also send impact state immediately so the IMPACT tab is pre-hydrated
+    # on connect. Without this the tab is empty until the first impact_update
+    # broadcast fires, which only happens when a new observation is recorded.
+    if conn_mgr is not None:
+        await ws.send_text(json.dumps(_build_impact_snapshot()))
     try:
         while True:
             await ws.receive_text()   # keep-alive; ignore client messages
@@ -157,6 +162,25 @@ def _build_snapshot() -> dict:
         },
         "connected_ws": s.connected_ws,
         "conn_status":  dict(s.conn_status),
+    }
+
+
+def _build_impact_snapshot() -> dict:
+    """Build an impact_update payload from current in-memory observations."""
+    obs  = conn_mgr.impact.get_all()
+    ser  = [conn_mgr.impact.to_serialisable(o) for o in obs]
+    # Reuse the same stats shape the engine normally broadcasts
+    errs = [o.price_error_pct for o in obs if getattr(o, 'price_error_pct', None) is not None]
+    stats = {
+        "total":     len(obs),
+        "recording": sum(1 for o in obs if getattr(o, 'label_filled', 1) == 0),
+        "avg_err":   (sum(errs) / len(errs)) if errs else None,
+        "absorbed":  sum(1 for o in obs if getattr(o, 'absorbed_by_delta', False)),
+    }
+    return {
+        "type":         "impact_update",
+        "observations": ser,
+        "stats":        stats,
     }
 
 
@@ -216,11 +240,8 @@ async def get_history(sym: str = "BTC", tf: str = "5m", before: int = 0, limit: 
 @app.get("/api/impact")
 async def get_impact():
     if conn_mgr is None:
-        return {"observations": []}
-    obs = conn_mgr.impact.get_all()
-    return {
-        "observations": [conn_mgr.impact.to_serialisable(o) for o in obs[:50]],
-    }
+        return {"observations": [], "stats": {"total": 0, "recording": 0, "avg_err": None, "absorbed": 0}}
+    return _build_impact_snapshot()
 
 
 class SymbolRequest(BaseModel):

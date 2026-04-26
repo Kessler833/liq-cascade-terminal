@@ -139,6 +139,11 @@ function ensureAuxSlot(t: number) {
   }
 }
 
+/** Returns true when the IMPACT tab is currently visible. */
+function impactTabVisible(): boolean {
+  return !document.getElementById('impact-screen')?.classList.contains('hidden');
+}
+
 // ---- Message handler ----
 onMessage((msg: ServerMsg) => {
   switch (msg.type) {
@@ -355,8 +360,15 @@ onMessage((msg: ServerMsg) => {
 
     // ---- IMPACT TAB ----
     case 'impact_update': {
+      // Always keep state in sync so the tab switch handler has fresh data.
       state.impact_obs = msg.observations;
-      updateImpact(msg.observations, msg.stats);
+      // FIX: Only push DOM updates (and expensive Chart.js destroy+recreate)
+      // when the IMPACT tab is actually visible. Previously this ran on every
+      // backend push regardless of which tab was open, burning CPU recreating
+      // 4 Chart.js instances in the background on every liquidation event.
+      if (impactTabVisible()) {
+        updateImpact(msg.observations, msg.stats);
+      }
       break;
     }
   }

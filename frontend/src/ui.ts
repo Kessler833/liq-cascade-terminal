@@ -1,6 +1,7 @@
 /** DOM update functions — uses original HTML element IDs and CSS classes. */
 import { state, type FeedItem, type LogItem, type Stats } from './state';
 import { fmtUSD, fmtDelta, fmtPrice, fmtTime, el } from './utils';
+import { updateImpact } from './impact';
 
 const EXCHANGES = ['binance','bybit','okx','bitget','gate','dydx'] as const;
 
@@ -45,6 +46,20 @@ export function initControls(
         document.getElementById('terminal-screen')?.classList.add('hidden');
         document.getElementById('impact-screen')?.classList.remove('hidden');
         document.getElementById('strategy-bar')?.classList.add('hidden');
+        // FIX: render the table immediately from local state on every tab switch.
+        // Previously the tab was blank until the next impact_update WS message
+        // arrived (which only fires when a new observation is recorded, not on
+        // demand). state.impact_obs is already populated from the impact_update
+        // sent by the backend as part of the connection handshake.
+        const errs = state.impact_obs
+          .map(o => o.price_error_pct)
+          .filter((v): v is number => v != null);
+        updateImpact(state.impact_obs, {
+          total:     state.impact_obs.length,
+          recording: state.impact_obs.filter(o => o.label_filled === 0).length,
+          avg_err:   errs.length ? errs.reduce((a, b) => a + b, 0) / errs.length : null,
+          absorbed:  state.impact_obs.filter(o => o.absorbed_by_delta).length,
+        });
       } else {
         document.getElementById('terminal-screen')?.classList.remove('hidden');
         document.getElementById('impact-screen')?.classList.add('hidden');
