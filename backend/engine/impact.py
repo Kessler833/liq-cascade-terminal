@@ -28,7 +28,11 @@ import db.database as _db                    # DB
 log = logging.getLogger("liqterm.impact")
 
 SILENCE_WINDOW_S = 30.0
-MIN_LIQ_USD      = 100_000
+# FIX: lowered from 100_000 to 1_000 to match strategy.py MIN_LIQ_USD.
+# The previous 100k threshold silently dropped all liquidations below $100k,
+# meaning smaller cascades on lower-cap assets (SUI, LINK, DOGE) were never
+# recorded as impact observations. 1k aligns with the feed/stats threshold.
+MIN_LIQ_USD      = 1_000
 TICK_INTERVAL_S  = 0.2
 
 _INSERT_SQL = """
