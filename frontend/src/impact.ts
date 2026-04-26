@@ -146,6 +146,13 @@ function renderTable(): void {
 
 // ---- detail panel ----
 
+// FIX Bug-2: defer chart rendering until after the CSS panel-open transition
+// completes. #imp-detail transitions from width:0 → its full width over ~220ms.
+// If renderDetailCharts runs before layout is resolved, Chart.js measures a
+// zero-width canvas and produces invisible charts. A 250ms timeout clears the
+// transition before Chart.js calls getBoundingClientRect.
+const PANEL_OPEN_DELAY_MS = 250;
+
 function openDetail(id: string): void {
   if (_selectedId === id) { closeDetail(); return; }
 
@@ -160,7 +167,14 @@ function openDetail(id: string): void {
 
   fillDetailHeader(obs);
   renderCutoffBanner(obs);
-  renderDetailCharts(obs);
+
+  // Defer chart render until the panel slide-open transition has finished.
+  setTimeout(() => {
+    // Guard: user may have closed the panel before the timer fires.
+    if (_selectedId !== id) return;
+    const current = _allObs.find(o => o.id === _selectedId);
+    if (current) renderDetailCharts(current);
+  }, PANEL_OPEN_DELAY_MS);
 }
 
 function closeDetail(): void {
@@ -314,16 +328,15 @@ function renderDetailCharts(obs: ImpactObs): void {
   // ---- Chart 2: Predicted Terminal Price ----
   // Includes:
   //   - amber dashed horizontal line at cutoff_price ("stop line")
-  //   - amber dashed vertical annotation at the first tick where beyond_cutoff
-  //     becomes true (the exact crossing point)
+  //   - amber shaded region + vertical dashed line at the crossing tick
+  //     rendered by the cutoffRegion inline plugin (Bug-3 fix: plugin is now
+  //     correctly passed to the Chart constructor via the plugins array).
   const expSeries = obs.expected_price_series;
   if (expSeries && expSeries.length > 1) {
     const labels        = elapsedLabels(expSeries, origin);
     const data          = expSeries.map(([, v]) => v);
     const sideLineColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)' : 'rgba(0,230,118,0.85)';
 
-    // Find first index where the prediction crossed beyond the cutoff.
-    // We approximate by checking if the series value is beyond cutoff_price.
     const cutoffDatasets: object[] = [];
     if (obs.cutoff_price != null) {
       // Horizontal stop-line at cutoff_price
@@ -332,13 +345,10 @@ function renderDetailCharts(obs: ImpactObs): void {
       );
 
       // Vertical marker at the first tick that crossed the cutoff.
-      // For a long liq: price goes down → crossed when value < cutoff_price.
-      // For a short liq: price goes up  → crossed when value > cutoff_price.
       const crossIdx = data.findIndex(v =>
         obs.side === 'long' ? v < obs.cutoff_price! : v > obs.cutoff_price!
       );
       if (crossIdx >= 0) {
-        // Scatter a single vertical marker at the crossing tick.
         const crossPointData = labels.map((_, i) =>
           i === crossIdx ? obs.cutoff_price : null
         );
@@ -359,6 +369,21 @@ function renderDetailCharts(obs: ImpactObs): void {
 
     const canvasCtx = ctx('imp-chart-expected');
     if (canvasCtx) {
+      // FIX Bug-3: read the cutoffRegion plugin off the opts object and pass it
+      // to the Chart constructor as a per-instance plugin in the plugins array.
+      // Previously _cutoffPlugin was stored as a dangling property on opts but
+      // never forwarded to Chart(), so the shaded region was never drawn.
+      const opts = chartOptsWithCutoffPlugin(
+        'Predicted price',
+        fmtPrice,
+        obs.cutoff_price,
+        labels,
+      ) as any;
+      const instancePlugins: object[] = [];
+      if (opts._cutoffPlugin) {
+        instancePlugins.push(opts._cutoffPlugin);
+        delete opts._cutoffPlugin;
+      }
       _charts.expected = new Chart(
         canvasCtx,
         {
@@ -375,12 +400,8 @@ function renderDetailCharts(obs: ImpactObs): void {
               ...cascadeAnnotations(cascadeEvents, expSeries, origin),
             ],
           },
-          options: chartOptsWithCutoffPlugin(
-            'Predicted price',
-            fmtPrice,
-            obs.cutoff_price,
-            labels,
-          ),
+          options: opts,
+          plugins: instancePlugins,
         }
       );
     }
@@ -525,6 +546,10 @@ function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
  * Extended chart options for the predicted-price chart.
  * Adds an afterDraw plugin that renders a labelled vertical amber line
  * at the cutoff crossing tick, plus a shaded "beyond-cutoff" region.
+ *
+ * FIX Bug-3: the plugin is stored on `_cutoffPlugin` and must be passed
+ * to `new Chart(ctx, config, [plugin])` by the caller — it is NOT
+ * auto-registered here. renderDetailCharts reads and passes it correctly.
  */
 function chartOptsWithCutoffPlugin(
   yLabel: string,
@@ -536,95 +561,6 @@ function chartOptsWithCutoffPlugin(
 
   if (cutoffPrice == null) return base;
 
-  // We find the crossing tick index inside the plugin itself because we need
-  // access to the chart scales at draw time.
-  base.plugins = {
-    ...base.plugins,
-    // Inline Chart.js plugin (registered per-instance via plugins array below)
-  };
-
-  // Return base opts — the cutoff visual is handled via the scatter dataset
-  // and horizontal refLine already added in renderDetailCharts.
-  // The afterDraw plugin below adds the amber shaded region + label.
-  base.plugins.cutoffRegion = {
-    id: 'cutoffRegion',
-    afterDraw(chart: any) {
-      if (cutoffPrice == null) return;
-      const { ctx: c, scales: { x, y } } = chart;
-      if (!x || !y) return;
-
-      // Find the first x-tick index where the main series crosses cutoff
-      const mainDs = chart.data.datasets[0];
-      if (!mainDs) return;
-      const vals: (number | null)[] = mainDs.data;
-
-      // Determine side from whether the main series eventually goes below
-      // or above cutoff_price.
-      let crossIdx = -1;
-      for (let i = 0; i < vals.length; i++) {
-        const v = vals[i];
-        if (v == null) continue;
-        // long liq → terminal goes down → cross when value drops below cutoff
-        // short liq → terminal goes up  → cross when value rises above cutoff
-        const prevOk = i === 0 ? true : (
-          (vals[i - 1] ?? cutoffPrice) >= cutoffPrice
-        );
-        if (v < cutoffPrice && prevOk) { crossIdx = i; break; }
-        if (v > cutoffPrice && !prevOk) { crossIdx = i; break; }
-      }
-      // fallback: just use where series diverges from cutoff
-      if (crossIdx === -1) {
-        for (let i = 0; i < vals.length; i++) {
-          const v = vals[i];
-          if (v != null && Math.abs(v - cutoffPrice) > cutoffPrice * 0.0001) {
-            crossIdx = i;
-            break;
-          }
-        }
-      }
-      if (crossIdx < 0 || crossIdx >= labels.length) return;
-
-      const xPos  = x.getPixelForIndex(crossIdx);
-      const right = x.right;
-      const top   = y.top;
-      const bot   = y.bottom;
-
-      // Shaded region beyond cutoff
-      c.save();
-      c.fillStyle = 'rgba(255,157,0,0.06)';
-      c.fillRect(xPos, top, right - xPos, bot - top);
-
-      // Vertical dashed amber line at crossing
-      c.setLineDash([4, 4]);
-      c.strokeStyle = 'rgba(255,157,0,0.7)';
-      c.lineWidth = 1.5;
-      c.beginPath();
-      c.moveTo(xPos, top);
-      c.lineTo(xPos, bot);
-      c.stroke();
-
-      // Label "Book depth limit"
-      c.setLineDash([]);
-      c.fillStyle = 'rgba(255,157,0,0.9)';
-      c.font = '9px monospace';
-      c.textAlign = 'left';
-      c.fillText('Book depth limit', xPos + 4, top + 12);
-
-      c.restore();
-    },
-  };
-
-  // Register inline plugin by adding it to the chart's plugins array.
-  // Chart.js v3+ supports per-instance plugins via the plugins config array.
-  base.plugins.customPlugins = [base.plugins.cutoffRegion];
-  // Chart.js reads per-instance plugins from chart options.plugins array
-  // only in some configs; the reliable path is to add to Chart.register.
-  // We'll attach it via a wrapper instead.
-  delete base.plugins.cutoffRegion;
-
-  // Store as a top-level property; caller must pass it to Chart constructor
-  // as the 3rd argument `plugins` array is not standard.
-  // Cleanest approach: embed as an inline plugin on the chart config.
   base._cutoffPlugin = {
     id: 'cutoffRegion',
     afterDraw(chart: any) {
@@ -634,6 +570,7 @@ function chartOptsWithCutoffPlugin(
       const mainDs = chart.data.datasets[0];
       if (!mainDs) return;
       const vals: (number | null)[] = mainDs.data;
+
       let crossIdx = -1;
       for (let i = 0; i < vals.length; i++) {
         const v = vals[i];
@@ -642,13 +579,16 @@ function chartOptsWithCutoffPlugin(
         if (v > cutoffPrice) { crossIdx = i; break; }
       }
       if (crossIdx < 0 || crossIdx >= labels.length) return;
+
       const xPos  = x.getPixelForIndex(crossIdx);
       const right = x.right;
       const top   = y.top;
       const bot   = y.bottom;
+
       c.save();
       c.fillStyle = 'rgba(255,157,0,0.06)';
       c.fillRect(xPos, top, right - xPos, bot - top);
+
       c.setLineDash([4, 4]);
       c.strokeStyle = 'rgba(255,157,0,0.7)';
       c.lineWidth = 1.5;
@@ -656,25 +596,19 @@ function chartOptsWithCutoffPlugin(
       c.moveTo(xPos, top);
       c.lineTo(xPos, bot);
       c.stroke();
+
       c.setLineDash([]);
       c.fillStyle = 'rgba(255,157,0,0.9)';
       c.font = '9px monospace';
       c.textAlign = 'left';
       c.fillText('Book depth limit', xPos + 4, top + 12);
+
       c.restore();
     },
   };
 
   return base;
 }
-
-// Override renderDetailCharts to pass the cutoff plugin properly.
-// We patch the Chart constructor call for the expected chart in-place above,
-// but Chart.js v3 per-instance plugins must be in the config object under
-// `plugins` key as an array — not under `options.plugins`.
-// The cleanest fix is to return {config, plugins} and use the 2-arg form:
-//   new Chart(ctx, { ...config, plugins: [cutoffPlugin] })
-// This is handled in renderDetailCharts by reading _cutoffPlugin off the opts.
 
 // FIX: replaced non-null assertion `!` with a null check.
 function ctx(id: string): CanvasRenderingContext2D | null {

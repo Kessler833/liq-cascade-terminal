@@ -178,10 +178,23 @@ class ImpactRecorder:
         _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
     # ------------------------------------------------------------------
-    async def on_liquidation(self, exchange: str, side: str, usd_val: float, price: float):
+    # FIX Bug-1: on_liquidation now accepts an explicit `sym` argument so
+    # callers can record observations for any symbol, not just the active one.
+    # Defaults to self._s.symbol to preserve backwards compatibility with
+    # existing call-sites in connections.py that already filter by symbol.
+    # ------------------------------------------------------------------
+    async def on_liquidation(
+        self,
+        exchange: str,
+        side: str,
+        usd_val: float,
+        price: float,
+        sym: str | None = None,
+    ):
         if usd_val < MIN_LIQ_USD:
             return
-        sym    = self._s.symbol
+        if sym is None:
+            sym = self._s.symbol
         now    = time.time()
         active = self.active.get(sym)
 
@@ -200,7 +213,11 @@ class ImpactRecorder:
             if active:
                 await self._close_obs(sym)
 
-            res = self._l2.compute_terminal_price(usd_val, self._s.cumulative_delta, side)
+            # Use price from the active symbol for L2 model inputs; the L2
+            # book is keyed on the active symbol so cross-symbol predictions
+            # are not supported, but the observation is still recorded.
+            delta = self._s.cumulative_delta
+            res   = self._l2.compute_terminal_price(usd_val, delta, side)
             obs = {
                 "id":                    _gen_id(),
                 "asset":                 sym,
@@ -210,7 +227,7 @@ class ImpactRecorder:
                 "exchange":              exchange,
                 "cascade_size":          1,
                 "initial_liq_volume":    usd_val,
-                "initial_delta":         self._s.cumulative_delta,
+                "initial_delta":         delta,
                 "initial_expected_price": res["terminal_price"],
                 "total_liq_volume":      usd_val,
                 "liq_remaining":         usd_val,
