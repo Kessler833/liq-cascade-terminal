@@ -282,16 +282,11 @@ class ImpactRecorder:
             if res["cutoff_price"] is not None:
                 obs["cutoff_price"] = res["cutoff_price"]
 
-            # Absorption: counter-flow covers > 50% of the INITIAL liq volume.
-            # Using initial_liq_volume (not the current decayed liq_remaining)
-            # prevents false positives once the tank approaches zero.
-            init_vol = obs["initial_liq_volume"]
-            if obs["side"] == "long":
-                if delta > 0 and delta > init_vol * 0.5:
-                    obs["absorbed_by_delta"] = True
-            else:
-                if delta < 0 and abs(delta) > init_vol * 0.5:
-                    obs["absorbed_by_delta"] = True
+            # Absorption: total_pressure <= 0 means current-second counter-flow
+            # fully cancels remaining liq pressure — the exact condition from the
+            # model spec. l2_model returns absorbed=True when this occurs.
+            if res["absorbed"]:
+                obs["absorbed_by_delta"] = True
 
             silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
             tank_dry        = obs["liq_remaining"] <= 0
