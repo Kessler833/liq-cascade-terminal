@@ -154,6 +154,80 @@ let _impactDetailOpen   = false;
 let _impactDetailObs    = null;
 let _impactCharts       = {};
 
+// ---------- selection state ----------
+// Set of observation IDs currently checked
+const _impactSelected = new Set();
+
+function _syncDeleteBtn() {
+  const btn = document.getElementById('imp-delete-btn');
+  const cnt = document.getElementById('imp-delete-count');
+  if (!btn || !cnt) return;
+  if (_impactSelected.size > 0) {
+    btn.classList.add('visible');
+    cnt.textContent = _impactSelected.size;
+  } else {
+    btn.classList.remove('visible');
+    cnt.textContent = '0';
+  }
+  // Sync select-all checkbox state
+  _syncSelectAllCheckbox();
+}
+
+function _syncSelectAllCheckbox() {
+  const chkAll = document.getElementById('imp-chk-all');
+  if (!chkAll) return;
+  const filtered = _filteredObs();
+  const total    = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / IMPACT_PAGE_SIZE));
+  const start  = (_impactPage - 1) * IMPACT_PAGE_SIZE;
+  const page   = filtered.slice(start, start + IMPACT_PAGE_SIZE);
+  const pageIds = page.map(o => o.id);
+  if (pageIds.length === 0) {
+    chkAll.checked = false;
+    chkAll.indeterminate = false;
+    return;
+  }
+  const selectedOnPage = pageIds.filter(id => _impactSelected.has(id));
+  if (selectedOnPage.length === 0) {
+    chkAll.checked = false;
+    chkAll.indeterminate = false;
+  } else if (selectedOnPage.length === pageIds.length) {
+    chkAll.checked = true;
+    chkAll.indeterminate = false;
+  } else {
+    chkAll.checked = false;
+    chkAll.indeterminate = true;
+  }
+}
+
+function _deleteSelected() {
+  if (_impactSelected.size === 0) return;
+
+  // Close detail panel if the open obs is being deleted
+  if (_impactDetailObs && _impactSelected.has(_impactDetailObs.id)) {
+    _closeImpactDetail();
+  }
+
+  // Remove from impactObs (completed)
+  for (let i = impactObs.length - 1; i >= 0; i--) {
+    if (_impactSelected.has(impactObs[i].id)) {
+      impactObs.splice(i, 1);
+    }
+  }
+
+  // Remove from impactActive (recording — just close/discard)
+  for (const sym of Object.keys(impactActive)) {
+    if (impactActive[sym] && _impactSelected.has(impactActive[sym].id)) {
+      delete impactActive[sym];
+    }
+  }
+
+  _impactSelected.clear();
+  _syncDeleteBtn();
+  _updateImpactTable();
+  _updateImpactStats();
+}
+
 // ---------- stats bar ----------
 function _updateImpactStats() {
   const all = _getAllObs();
@@ -167,7 +241,7 @@ function _updateImpactStats() {
 
   document.getElementById('imp-kpi-total').textContent     = all.length;
   document.getElementById('imp-kpi-recording').textContent = recording.length;
-  document.getElementById('imp-kpi-avg-err').textContent   = avgErr !== null ? avgErr.toFixed(3) + '%' : '—';
+  document.getElementById('imp-kpi-avg-err').textContent   = avgErr !== null ? avgErr.toFixed(3) + '%' : '\u2014';
   document.getElementById('imp-kpi-absorbed').textContent  = absorbed.length;
 }
 
@@ -226,8 +300,11 @@ function _updateImpactTable() {
 
   const nowTs = Date.now();
   page.forEach(obs => {
+    const isSelected = _impactSelected.has(obs.id);
     const tr = document.createElement('tr');
-    tr.className = 'imp-row' + (_impactDetailObs && _impactDetailObs.id === obs.id ? ' active' : '');
+    tr.className = 'imp-row'
+      + (_impactDetailObs && _impactDetailObs.id === obs.id ? ' active' : '')
+      + (isSelected ? ' selected' : '');
     tr.dataset.id = obs.id;
 
     const isRec = obs.labelFilled === 0;
@@ -243,15 +320,17 @@ function _updateImpactTable() {
     const deltaColor = obs.initialDelta <= 0 ? 'var(--green)' : 'var(--red)';
 
     const initialExpFmt  = formatPrice(obs.initialExpectedPrice);
-    const finalExpFmt    = obs.finalExpectedPrice  ? formatPrice(obs.finalExpectedPrice)  : '—';
-    const actualFmt      = obs.actualTerminalPrice ? formatPrice(obs.actualTerminalPrice) : '—';
-    const errFmt         = obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '—';
+    const finalExpFmt    = obs.finalExpectedPrice  ? formatPrice(obs.finalExpectedPrice)  : '\u2014';
+    const actualFmt      = obs.actualTerminalPrice ? formatPrice(obs.actualTerminalPrice) : '\u2014';
+    const errFmt         = obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '\u2014';
     const errColor       = _errColor(obs.priceErrorPct);
-    const durFmt         = obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : '—';
+    const durFmt         = obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : '\u2014';
     const absHtml        = obs.absorbedByDelta
-      ? `<span class="imp-badge cyan">ABS</span>` : '—';
+      ? `<span class="imp-badge cyan">ABS</span>` : '\u2014';
+    const chkChecked     = isSelected ? 'checked' : '';
 
     tr.innerHTML = `
+      <td class="imp-td-check"><input type="checkbox" class="imp-chk" data-id="${obs.id}" ${chkChecked}></td>
       <td class="imp-td">${statusHtml}</td>
       <td class="imp-td mono" style="color:var(--text-muted);font-size:10px">${dateStr} ${timeStr}</td>
       <td class="imp-td" style="color:var(--accent)">${obs.asset}</td>
@@ -267,10 +346,31 @@ function _updateImpactTable() {
       <td class="imp-td mono" style="color:var(--text-muted)">${durFmt}</td>
       <td class="imp-td">${absHtml}</td>
     `;
-    tr.addEventListener('click', () => _openImpactDetail(obs.id));
+
+    // Checkbox: toggle selection without opening detail
+    const chk = tr.querySelector('.imp-chk');
+    chk.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = e.target.dataset.id;
+      if (e.target.checked) {
+        _impactSelected.add(id);
+      } else {
+        _impactSelected.delete(id);
+      }
+      tr.classList.toggle('selected', e.target.checked);
+      _syncDeleteBtn();
+    });
+
+    // Row click (not on checkbox) opens detail
+    tr.addEventListener('click', e => {
+      if (e.target.classList.contains('imp-chk')) return;
+      _openImpactDetail(obs.id);
+    });
+
     tbody.appendChild(tr);
   });
 
+  _syncDeleteBtn();
   _updateImpactStats();
 }
 
@@ -296,8 +396,8 @@ function _openImpactDetail(id) {
   document.getElementById('det-imp-entry').textContent = formatPrice(obs.entryPrice);
   document.getElementById('det-imp-exch').textContent  = obs.exchange.charAt(0).toUpperCase() + obs.exchange.slice(1);
   document.getElementById('det-imp-size').innerHTML    = _sizeBadge(obs.cascadeSize);
-  document.getElementById('det-imp-dur').textContent   = obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : 'recording…';
-  document.getElementById('det-imp-err').textContent   = obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '—';
+  document.getElementById('det-imp-dur').textContent   = obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : 'recording\u2026';
+  document.getElementById('det-imp-err').textContent   = obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '\u2014';
   document.getElementById('det-imp-err').style.color   = _errColor(obs.priceErrorPct);
   document.getElementById('det-imp-abs').textContent   = obs.absorbedByDelta ? 'YES' : 'NO';
   document.getElementById('det-imp-abs').style.color   = obs.absorbedByDelta ? 'var(--accent)' : 'var(--text-faint)';
@@ -563,9 +663,9 @@ function _refreshDetailCharts() {
   _renderImpactCharts(obs);
   // Refresh header fields too
   document.getElementById('det-imp-dur').textContent =
-    obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : 'recording…';
+    obs.cascadeDurationS !== null ? obs.cascadeDurationS.toFixed(1)+'s' : 'recording\u2026';
   document.getElementById('det-imp-err').textContent =
-    obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '—';
+    obs.priceErrorPct !== null ? obs.priceErrorPct.toFixed(3)+'%' : '\u2014';
   document.getElementById('det-imp-err').style.color = _errColor(obs.priceErrorPct);
   document.getElementById('det-imp-size').innerHTML = _sizeBadge(obs.cascadeSize);
 }
@@ -591,6 +691,26 @@ function initImpactTab() {
     _impactPage++; _updateImpactTable();
   });
   document.getElementById('imp-detail-close').addEventListener('click', _closeImpactDetail);
+
+  // Select-all checkbox in thead
+  document.getElementById('imp-chk-all').addEventListener('change', e => {
+    const filtered = _filteredObs();
+    const total    = filtered.length;
+    const start    = (_impactPage - 1) * IMPACT_PAGE_SIZE;
+    const page     = filtered.slice(start, start + IMPACT_PAGE_SIZE);
+    page.forEach(obs => {
+      if (e.target.checked) {
+        _impactSelected.add(obs.id);
+      } else {
+        _impactSelected.delete(obs.id);
+      }
+    });
+    _updateImpactTable();
+    _syncDeleteBtn();
+  });
+
+  // Delete selected button
+  document.getElementById('imp-delete-btn').addEventListener('click', _deleteSelected);
 
   _updateImpactStats();
   _updateImpactTable();
