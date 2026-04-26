@@ -4,20 +4,14 @@ Records per-cascade observations: entry price, liq volume, predicted vs actual
 terminal price, delta series, price series, and liq-remaining tank.
 
 Multi-symbol: all symbols are tracked in parallel. Each symbol has its own
-entry in self.active. _tick_all reads per-symbol price and delta from
-AppState.sym_price / AppState.sym_delta so every observation gets the correct
-market context regardless of which symbol is currently displayed.
-
-DB changes vs. original (all marked  # DB):
-  - imports json + db.database
-  - _obs_to_db_row() / _db_row_to_obs()  serialise / deserialise
-  - _persist_obs()    fire-and-forget INSERT OR REPLACE on cascade close
-  - load_from_db()    called by ConnectionManager on startup to restore history
+entry in self.active. _tick_all reads per-symbol price and snapshot delta from
+AppState.sym_price / AppState.sym_snapshot_delta so every observation gets the
+correct market context regardless of which symbol is currently displayed.
 """
 from __future__ import annotations
 
 import asyncio
-import json                                   # DB
+import json
 import logging
 import random
 import string
@@ -28,7 +22,7 @@ if TYPE_CHECKING:
     from engine.state import AppState
     from engine.l2_model import L2Model
 
-import db.database as _db                    # DB
+import db.database as _db
 
 log = logging.getLogger("liqterm.impact")
 
@@ -54,7 +48,7 @@ INSERT OR REPLACE INTO cascade_observations (
     :delta_series, :expected_price_series, :price_series,
     :liq_remaining_series, :cascade_events_json, :label_filled
 )
-"""                                           # DB
+"""
 
 
 def _gen_id() -> str:
@@ -64,18 +58,18 @@ def _gen_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# DB helpers                                                              # DB
+# DB helpers
 # ---------------------------------------------------------------------------
 
-def _jdump(val) -> str | None:               # DB
+def _jdump(val) -> str | None:
     return json.dumps(val) if val else None
 
 
-def _jload(val) -> list:                     # DB
+def _jload(val) -> list:
     return json.loads(val) if val else []
 
 
-def _obs_to_db_row(obs: dict) -> dict:       # DB
+def _obs_to_db_row(obs: dict) -> dict:
     return {
         "obs_id":                 obs["id"],
         "asset":                  obs["asset"],
@@ -104,7 +98,7 @@ def _obs_to_db_row(obs: dict) -> dict:       # DB
     }
 
 
-def _db_row_to_obs(row: dict) -> dict:       # DB
+def _db_row_to_obs(row: dict) -> dict:
     return {
         "id":                     row["obs_id"],
         "asset":                  row["asset"],
@@ -149,14 +143,11 @@ class ImpactRecorder:
         self._s = app_state
         self._l2 = l2_model
         self._broadcast = broadcast
-        self.observations: list[dict] = []   # completed, newest first
-        self.active: dict[str, dict] = {}    # sym -> in-progress obs
+        self.observations: list[dict] = []
+        self.active: dict[str, dict] = {}
         self._tick_task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------------
-    # DB: restore completed observations from disk on startup          # DB
-    # ------------------------------------------------------------------
-    async def load_from_db(self, limit: int = 200) -> None:            # DB
+    async def load_from_db(self, limit: int = 200) -> None:
         try:
             rows = await _db.fetchall(
                 "SELECT * FROM cascade_observations "
@@ -170,17 +161,11 @@ class ImpactRecorder:
         self.observations = [_db_row_to_obs(r) for r in rows]
         log.info("Loaded %d observations from DB", len(self.observations))
 
-    # ------------------------------------------------------------------
-    # DB: persist a closed observation (fire-and-forget)               # DB
-    # ------------------------------------------------------------------
-    def _persist_obs(self, obs: dict) -> None:                         # DB
+    def _persist_obs(self, obs: dict) -> None:
         _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
     # ------------------------------------------------------------------
-    # on_liquidation: record for any symbol, not just the active one.
-    # `sym` is the canonical symbol key (e.g. "BTC", "ETH", "SOL").
-    # connections.py passes event_sym for every liq event it receives,
-    # so all connected symbols are tracked in parallel.
+    # on_liquidation
     # ------------------------------------------------------------------
     async def on_liquidation(
         self,
@@ -204,17 +189,19 @@ class ImpactRecorder:
             active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
         else:
-            # Ensure the tick loop is running before the first await.
             if self._tick_task is None or self._tick_task.done():
                 self._tick_task = asyncio.create_task(self._tick_loop())
 
             if active:
                 await self._close_obs(sym)
 
-            # Read per-symbol delta and price — fall back to active-symbol
-            # values if the symbol hasn't had any ticks yet (cold start).
-            delta = self._s.sym_delta.get(sym, self._s.cumulative_delta)
-            res   = self._l2.compute_terminal_price(usd_val, delta, side, sym=sym)
+            # Read the current-second snapshot delta for this symbol.
+            # This is the net buy/sell notional of all trades that arrived
+            # in this exact second across all 6 exchanges — a true
+            # instantaneous reading with no accumulation or bucketing.
+            delta = self._s.sym_snapshot_delta.get(sym, 0.0)
+
+            res = self._l2.compute_terminal_price(usd_val, delta, side, sym=sym)
             obs = {
                 "id":                    _gen_id(),
                 "asset":                 sym,
@@ -262,15 +249,13 @@ class ImpactRecorder:
         for sym, obs in list(self.active.items()):
             obs["liq_remaining"] = max(0, obs["liq_remaining"] * 0.97)
 
-            # Per-symbol price and delta — fall back to active-symbol values
-            # only if this symbol hasn't sent any ticks yet (cold start).
             sym_price = self._s.sym_price.get(sym) or self._s.price
-            sym_delta = self._s.sym_delta.get(sym, self._s.cumulative_delta)
+            delta     = self._s.sym_snapshot_delta.get(sym, 0.0)
 
             res = self._l2.compute_terminal_price(
-                obs["liq_remaining"], sym_delta, obs["side"], sym=sym
+                obs["liq_remaining"], delta, obs["side"], sym=sym
             )
-            obs["delta_series"].append([now, sym_delta])
+            obs["delta_series"].append([now, delta])
             obs["expected_price_series"].append([now, res["terminal_price"]])
             obs["price_series"].append([now, sym_price])
             obs["liq_remaining_series"].append([now, obs["liq_remaining"]])
@@ -282,10 +267,12 @@ class ImpactRecorder:
 
             if res["absorbed"]:
                 obs["absorbed_by_delta"] = True
+
             silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
             tank_dry        = obs["liq_remaining"] < obs["initial_liq_volume"] * 0.02
             if silence_expired or tank_dry:
                 to_close.append(sym)
+
         for sym in to_close:
             await self._close_obs(sym)
 
@@ -299,7 +286,6 @@ class ImpactRecorder:
             if obs["expected_price_series"]
             else obs["initial_expected_price"]
         )
-        # Use the per-symbol actual price at close time.
         obs["actual_terminal_price"] = (
             self._s.sym_price.get(sym) or self._s.price
         )
@@ -313,7 +299,7 @@ class ImpactRecorder:
             (events[-1][0] - events[0][0]) if len(events) > 1 else 0.0
         )
         self.observations.insert(0, obs)
-        self._persist_obs(obs)           # DB: fire-and-forget write to SQLite
+        self._persist_obs(obs)
         await self._broadcast_table_update()
 
     # ------------------------------------------------------------------
