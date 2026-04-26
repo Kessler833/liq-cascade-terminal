@@ -14,7 +14,7 @@ import {
 } from './ui';
 import {
   initPriceChart, initLiqChart, initDeltaChart,
-  updatePriceChart, updateLiqChart, updateDeltaChart,
+  updatePriceChart, updateLastBar, updateLiqChart, updateDeltaChart,
   resizeAll, setupChartSync,
   onNearLeftEdge, getVisibleLogicalRange, setVisibleLogicalRange,
   scrollToLatest,
@@ -97,11 +97,26 @@ initControls(
       }
     } catch (_e) {}
   },
+  // FIX Bug 13: TF change handler now immediately clears and resets charts
+  // instead of waiting silently for the next WS history push.
+  // Flow:
+  //   1. Tell backend to switch TF (triggers a 'history' WS broadcast).
+  //   2. Immediately wipe state + flush empty series so no stale data shows.
+  //   3. Update header label right away.
+  //   4. The incoming 'history' WS message repopulates everything normally.
   async (tf) => {
     _lastSwitch = Date.now();
     prependLogItem({ msg: `Switching to ${tf} timeframe...`, type: 'sys', ts: Date.now() });
     await api.setTimeframe(tf);
-    state.timeframe = tf;
+    state.timeframe  = tf;
+    state.candles    = [];
+    state.liq_bars   = [];
+    state.delta_bars = [];
+    updatePriceChart([]);
+    updateLiqChart([]);
+    updateDeltaChart([]);
+    updateCandleLabel(state.symbol, tf);
+    updateStatusBar({ timeframe: tf, candles: 0 });
   },
   SYMBOLS, TIMEFRAMES,
 );
@@ -189,10 +204,6 @@ onMessage((msg: ServerMsg) => {
       const c: Candle = { t: msg.t, o: msg.o, h: msg.h, l: msg.l, c: msg.c, v: msg.v };
       state.price = msg.c;
       updatePrice(msg.c);
-      // FIX: use findIndex (same as the kline handler) instead of findLastIndex.
-      // findLastIndex would update a different candle object than findIndex if
-      // duplicate `t` entries exist, causing a silent chart split. Both handlers
-      // must consistently target the FIRST matching candle.
       const idx = state.candles.findIndex((x: Candle) => x.t === c.t);
       if (idx >= 0) {
         state.candles[idx] = c;
@@ -205,7 +216,14 @@ onMessage((msg: ServerMsg) => {
           state.delta_bars.shift();
         }
       }
-      updatePriceChart(state.candles);
+      // FIX Bug 14: use updateLastBar (series.update) instead of full
+      // updatePriceChart (series.setData) on every trade tick.
+      // series.setData() is O(n) and rebuilds the entire chart — at BTC
+      // trade volume (thousands of ticks/sec) this caused severe CPU spikes
+      // and visible chart lag. series.update() paints only the last bar: O(1).
+      // Full setData is still used for history/snapshot/kline/candle_open
+      // where a complete series rebuild is correct.
+      updateLastBar(c);
       updateStatusBar({ lastUpdate: true });
       break;
     }
