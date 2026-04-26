@@ -153,6 +153,8 @@ function openDetail(id: string): void {
 
   const obs = _allObs.find(o => o.id === id);
   if (!obs) return;
+
+  const wasOpen = _selectedId !== null;  // panel already visible, no transition
   _selectedId = id;
 
   document.querySelectorAll('.imp-row').forEach(r =>
@@ -163,12 +165,15 @@ function openDetail(id: string): void {
   fillDetailHeader(obs);
   renderCutoffBanner(obs);
 
-  // Defer until height transition completes so Chart.js can measure canvas dimensions.
+  // Only wait for the CSS height transition when the panel is newly opening.
+  // When switching between observations the panel is already fully laid out —
+  // delaying causes a race where the timeout fires into a stale render cycle.
+  const delay = wasOpen ? 0 : PANEL_OPEN_DELAY_MS;
   setTimeout(() => {
     if (_selectedId !== id) return;
     const current = _allObs.find(o => o.id === _selectedId);
     if (current) renderDetailCharts(current);
-  }, PANEL_OPEN_DELAY_MS);
+  }, delay);
 }
 
 function closeDetail(): void {
@@ -280,13 +285,22 @@ function destroyCharts(): void {
 }
 
 /**
- * Get a canvas element by ID.
- * NOTE: Chart.js v4 should receive the canvas element, NOT a 2D context.
- * Passing a CanvasRenderingContext2D was valid in v3 but causes sizing bugs
- * in v4 because the library no longer reads dimensions from the context.
+ * Get a canvas element by ID, destroying any Chart.js instance already
+ * registered on it first.
+ *
+ * Chart.js v4 maintains an internal canvas registry. Calling chart.destroy()
+ * on our own reference is not enough when switching observations — the old
+ * instance can still be registered on the canvas element itself, causing the
+ * next new Chart() call to silently fail. Chart.getChart(canvas) looks up
+ * the registry directly and is the only reliable way to clear it.
  */
 function getCanvas(id: string): HTMLCanvasElement | null {
-  return document.getElementById(id) as HTMLCanvasElement | null;
+  const canvas = document.getElementById(id) as HTMLCanvasElement | null;
+  if (!canvas) return null;
+  if (typeof Chart !== 'undefined') {
+    Chart.getChart(canvas)?.destroy();
+  }
+  return canvas;
 }
 
 function renderDetailCharts(obs: ImpactObs): void {
