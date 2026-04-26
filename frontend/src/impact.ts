@@ -20,6 +20,9 @@ let _allObs: ImpactObs[] = [];
 let _stats: ImpactStats  = { total: 0, recording: 0, avg_err: null, absorbed: 0 };
 let _charts: Record<string, any> = {};
 
+// ---- selection state ----
+const _checkedIds = new Set<string>();
+
 // ---- public API ----
 
 export function initImpactTab(): void {
@@ -40,6 +43,18 @@ export function initImpactTab(): void {
     _page++; renderTable();
   });
   document.getElementById('imp-detail-close')?.addEventListener('click', closeDetail);
+
+  // Select-all checkbox
+  document.getElementById('imp-chk-all')?.addEventListener('change', e => {
+    const checked = (e.target as HTMLInputElement).checked;
+    const page = currentPageObs();
+    page.forEach(o => checked ? _checkedIds.add(o.id) : _checkedIds.delete(o.id));
+    renderTable();
+    syncDeleteBtn();
+  });
+
+  // Delete button
+  document.getElementById('imp-delete-btn')?.addEventListener('click', deleteSelected);
 }
 
 export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
@@ -60,6 +75,48 @@ export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
 
   const empty = document.getElementById('imp-empty-state');
   if (empty) empty.style.display = obs.length === 0 ? 'flex' : 'none';
+}
+
+// ---- selection helpers ----
+
+function currentPageObs(): ImpactObs[] {
+  const rows  = filtered();
+  const start = (_page - 1) * PAGE_SIZE;
+  return rows.slice(start, start + PAGE_SIZE);
+}
+
+function syncDeleteBtn(): void {
+  const btn = document.getElementById('imp-delete-btn');
+  const countEl = document.getElementById('imp-delete-count');
+  const n = _checkedIds.size;
+  if (btn)     btn.classList.toggle('visible', n > 0);
+  if (countEl) countEl.textContent = String(n);
+
+  // Sync select-all checkbox state
+  const allChk = document.getElementById('imp-chk-all') as HTMLInputElement | null;
+  if (!allChk) return;
+  const page = currentPageObs();
+  const checkedOnPage = page.filter(o => _checkedIds.has(o.id)).length;
+  if (checkedOnPage === 0) {
+    allChk.checked       = false;
+    allChk.indeterminate = false;
+  } else if (checkedOnPage === page.length) {
+    allChk.checked       = true;
+    allChk.indeterminate = false;
+  } else {
+    allChk.checked       = false;
+    allChk.indeterminate = true;
+  }
+}
+
+function deleteSelected(): void {
+  if (_checkedIds.size === 0) return;
+  _allObs = _allObs.filter(o => !_checkedIds.has(o.id));
+  if (_selectedId && _checkedIds.has(_selectedId)) closeDetail();
+  _checkedIds.clear();
+  renderStats();
+  renderTable();
+  syncDeleteBtn();
 }
 
 // ---- stats bar ----
@@ -107,7 +164,8 @@ function renderTable(): void {
   tbody.innerHTML = '';
 
   for (const obs of page) {
-    const tr = el('tr', 'imp-row' + (_selectedId === obs.id ? ' active' : ''));
+    const isChecked  = _checkedIds.has(obs.id);
+    const tr = el('tr', 'imp-row' + (_selectedId === obs.id ? ' active' : '') + (isChecked ? ' selected' : ''));
     tr.dataset.id = obs.id;
 
     const isRec      = obs.label_filled === 0;
@@ -122,7 +180,27 @@ function renderTable(): void {
       ? ' <span class="imp-badge amber" title="Terminal price estimate crossed book depth cutoff — fewer exchanges contributing">CUTOFF</span>'
       : '';
 
-    tr.innerHTML = `
+    // Checkbox cell
+    const tdChk = el('td', 'imp-td imp-td-check');
+    const chk   = document.createElement('input');
+    chk.type    = 'checkbox';
+    chk.className = 'imp-chk';
+    chk.checked   = isChecked;
+    chk.addEventListener('change', e => {
+      e.stopPropagation();
+      if ((e.target as HTMLInputElement).checked) {
+        _checkedIds.add(obs.id);
+        tr.classList.add('selected');
+      } else {
+        _checkedIds.delete(obs.id);
+        tr.classList.remove('selected');
+      }
+      syncDeleteBtn();
+    });
+    tdChk.appendChild(chk);
+    tr.appendChild(tdChk);
+
+    tr.insertAdjacentHTML('beforeend', `
       <td class="imp-td"><span class="imp-dot ${isRec ? 'recording' : 'complete'}"></span>${cutoffBadge}</td>
       <td class="imp-td mono" style="color:var(--text-muted);font-size:10px">${timeStr}</td>
       <td class="imp-td" style="color:var(--accent)">${obs.asset}</td>
@@ -137,10 +215,12 @@ function renderTable(): void {
       <td class="imp-td mono" style="color:${errColor(obs.price_error_pct)}">${fmtPct(obs.price_error_pct)}</td>
       <td class="imp-td mono" style="color:var(--text-muted)">${obs.cascade_duration_s != null ? obs.cascade_duration_s.toFixed(1) + 's' : '—'}</td>
       <td class="imp-td">${obs.absorbed_by_delta ? '<span class="imp-badge cyan">ABS</span>' : '—'}</td>
-    `;
+    `);
     tr.addEventListener('click', () => openDetail(obs.id));
     tbody.appendChild(tr);
   }
+
+  syncDeleteBtn();
 }
 
 // ---- detail panel ----
