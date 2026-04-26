@@ -301,16 +301,21 @@ body { display: flex; flex-direction: column; }
 }
 .imp-select:focus { border-color: var(--accent2); }
 
-/* Delete selected button */
+/* ── Delete Selected button ── */
 #imp-delete-btn {
-  display: none; align-items: center; gap: 5px;
+  display: none;
+  align-items: center; gap: 5px;
   padding: 4px 10px; border-radius: 4px;
   border: 1px solid rgba(255,61,90,0.35);
   background: rgba(255,61,90,0.08); color: var(--red);
   font-size: 11px; font-weight: 600; font-family: var(--font);
   cursor: pointer; transition: all 0.15s ease; margin-left: 8px;
 }
-#imp-delete-btn:hover { background: rgba(255,61,90,0.18); border-color: rgba(255,61,90,0.6); }
+#imp-delete-btn svg { flex-shrink: 0; }
+#imp-delete-btn:hover {
+  background: rgba(255,61,90,0.18);
+  border-color: rgba(255,61,90,0.6);
+}
 #imp-delete-btn.visible { display: flex; }
 #imp-delete-count {
   background: rgba(255,61,90,0.25); color: var(--red);
@@ -326,10 +331,13 @@ body { display: flex; flex-direction: column; }
 /* Table */
 #imp-table-wrap {
   flex: 1; display: flex; flex-direction: column; min-height: 0;
-  overflow: hidden; border-right: 1px solid var(--border);
+  overflow-y: auto; border-right: 1px solid var(--border);
 }
+#imp-table-wrap::-webkit-scrollbar { width: 3px; }
+#imp-table-wrap::-webkit-scrollbar-track { background: transparent; }
+#imp-table-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 #imp-table {
-  width: 100%; border-collapse: collapse; flex-shrink: 0;
+  width: 100%; border-collapse: collapse;
 }
 .imp-thead { background: var(--surface2); position: sticky; top: 0; z-index: 5; }
 .imp-th {
@@ -338,48 +346,39 @@ body { display: flex; flex-direction: column; }
   letter-spacing: 0.1em; color: var(--text-faint);
   border-bottom: 1px solid var(--border); white-space: nowrap;
 }
+/* Checkbox column header */
 .imp-th.imp-th-check { width: 28px; padding: 6px 8px; }
+
 .imp-row {
   cursor: pointer; transition: background 0.1s;
   border-bottom: 1px solid rgba(31,36,48,0.5);
 }
-.imp-row:hover { background: var(--surface2); }
+.imp-row:hover  { background: var(--surface2); }
 .imp-row.active { background: var(--surface3); }
-.imp-row.selected { background: rgba(255,61,90,0.06); }
-.imp-row.selected:hover { background: rgba(255,61,90,0.1); }
+/* Selected row: red tint */
+.imp-row.selected       { background: rgba(255,61,90,0.06); }
+.imp-row.selected:hover { background: rgba(255,61,90,0.10); }
+
 .imp-td {
   padding: 5px 10px; font-size: 11px; color: var(--text-muted);
   white-space: nowrap;
 }
-.imp-td-check {
-  padding: 5px 8px; width: 28px;
-}
+/* Checkbox cell */
+.imp-td-check { padding: 5px 8px; width: 28px; }
+
 .mono { font-variant-numeric: tabular-nums; }
 
-/* Checkbox styling */
-.imp-chk {
+/* Checkbox accent */
+.imp-chk, #imp-chk-all {
   width: 13px; height: 13px; cursor: pointer;
   accent-color: var(--red);
 }
-#imp-chk-all {
-  width: 13px; height: 13px; cursor: pointer;
-  accent-color: var(--red);
-}
-
-/* Table scrolls independently */
-#imp-table-wrap > table { flex-shrink: 0; }
-#imp-table-wrap {
-  overflow-y: auto;
-}
-#imp-table-wrap::-webkit-scrollbar { width: 3px; }
-#imp-table-wrap::-webkit-scrollbar-track { background: transparent; }
-#imp-table-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
 /* Pagination */
 #imp-pagination {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 14px; background: var(--surface2);
-  border-top: 1px solid var(--border); flex-shrink: 0;
+  border-top: 1px solid var(--border); flex-shrink: 0; position: sticky; bottom: 0;
 }
 .imp-page-btn {
   padding: 3px 10px; border-radius: 4px; border: 1px solid var(--border2);
