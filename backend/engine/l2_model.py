@@ -18,7 +18,7 @@ Key concepts
 
 Delta sign convention
 ---------------------
-snapshot_delta passed in from ImpactRecorder follows the standard convention:
+snapshot_delta follows the standard convention:
     positive = net buying pressure (buyers > sellers this second)
     negative = net selling pressure (sellers > buyers this second)
 
@@ -34,7 +34,12 @@ Unified:
     direction = +1 for long, -1 for short
     total_pressure = liq_notional - direction * snapshot_delta
 
-Absorbed when total_pressure <= 0.
+pressure_remaining
+------------------
+compute_terminal_price now returns pressure_remaining: the portion of
+total_pressure that was NOT consumed by walking the book.  ImpactRecorder
+uses this as the new liq_remaining on each tick — actual L2-based
+depletion rather than an arbitrary exponential decay.
 """
 from __future__ import annotations
 
@@ -281,53 +286,52 @@ class L2Model:
 
         Parameters
         ----------
-        liq_notional   : float — remaining liquidation notional (USD)
+        liq_notional   : float — current remaining liquidation notional (USD)
         snapshot_delta : float — current-second net flow
                                  (positive = buying, negative = selling)
         side           : str   — "long" (forced sell) or "short" (forced buy)
         sym            : str   — canonical symbol key e.g. "BTC"
 
-        Total pressure
-        --------------
-        Long liq: buyers counter the forced sells → subtract buying pressure
-            total_pressure = liq_notional - snapshot_delta
-
-        Short liq: sellers counter the forced buys → add selling pressure
-            total_pressure = liq_notional + snapshot_delta
-
-        Unified:
-            direction = +1 for long, -1 for short
-            total_pressure = liq_notional - direction * snapshot_delta
+        Returns
+        -------
+        dict with keys:
+            terminal_price    float  — estimated absorption price
+            levels_consumed   int
+            absorbed          bool   — counter-flow exceeds liq_notional
+            beyond_cutoff     bool
+            cutoff_price      float | None
+            pressure_remaining float — total_pressure not consumed by the book.
+                                       ImpactRecorder uses this as the updated
+                                       liq_remaining on each tick, giving real
+                                       L2-based depletion instead of an
+                                       arbitrary exponential decay.
         """
         if sym is None:
             sym = self._s.symbol
 
         mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
+        _empty = {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
+                  "beyond_cutoff": False, "cutoff_price": None, "pressure_remaining": 0.0}
+
         if mid == 0:
-            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
-                    "beyond_cutoff": False, "cutoff_price": None}
+            return _empty
 
         direction      = 1.0 if side == "long" else -1.0
         total_pressure = liq_notional - direction * snapshot_delta
 
         if total_pressure <= 0:
-            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": True,
-                    "beyond_cutoff": False, "cutoff_price": None}
+            return {**_empty, "absorbed": True}
 
         book_entry = self._books.get(sym)
         if book_entry is None:
-            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
-                    "beyond_cutoff": False, "cutoff_price": None}
+            return {**_empty, "pressure_remaining": total_pressure}
 
-        # long liq = forced sell → consumes bids (price moves down)
-        # short liq = forced buy  → consumes asks (price moves up)
         book   = book_entry.bids   if side == "long" else book_entry.asks
         cutoff = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
 
         if not book:
-            return {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
-                    "beyond_cutoff": False, "cutoff_price": cutoff}
+            return {**_empty, "pressure_remaining": total_pressure, "cutoff_price": cutoff}
 
         remaining     = total_pressure
         terminal      = mid
@@ -342,13 +346,15 @@ class L2Model:
                     beyond_cutoff = True
 
             if remaining <= usd:
-                terminal = price
+                terminal  = price
                 consumed += 1
+                remaining = 0.0
                 break
             remaining -= usd
             terminal   = price
             consumed  += 1
         else:
+            # Exhausted the book — extrapolate
             extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
             extra_pct  = (remaining / total_pressure) * extrap_pct
             if side == "long":
@@ -358,16 +364,11 @@ class L2Model:
             if cutoff is not None:
                 beyond_cutoff = True
 
-        # Absorbed = counter-flow covers more than 50% of liq notional
-        if side == "long":
-            absorbed = snapshot_delta > 0 and snapshot_delta > liq_notional * 0.5
-        else:
-            absorbed = snapshot_delta < 0 and abs(snapshot_delta) > liq_notional * 0.5
-
         return {
-            "terminal_price":  round(terminal, 6),
-            "levels_consumed": consumed,
-            "absorbed":        absorbed,
-            "beyond_cutoff":   beyond_cutoff,
-            "cutoff_price":    round(cutoff, 6) if cutoff is not None else None,
+            "terminal_price":    round(terminal, 6),
+            "levels_consumed":   consumed,
+            "absorbed":          False,   # absorption checked in impact.py against initial vol
+            "beyond_cutoff":     beyond_cutoff,
+            "cutoff_price":      round(cutoff, 6) if cutoff is not None else None,
+            "pressure_remaining": max(0.0, remaining),
         }
