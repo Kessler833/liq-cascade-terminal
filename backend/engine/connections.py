@@ -248,9 +248,29 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     async def _handle_binance_liq(self, o: dict, event_sym: str):
+        # FIX Bug-3: use filled quantity "z" instead of original order quantity "q".
+        #
+        # Binance forceOrder payload fields:
+        #   "q"  = original order quantity (base coin) — what was placed
+        #   "z"  = cumulative filled quantity (base coin) — what actually traded
+        #   "ap" = average fill price (0.0 if nothing has filled yet)
+        #   "p"  = order price
+        #
+        # Using "q" overstated notional for partial fills and produced phantom
+        # notional for unfilled orders ("ap" == 0, "z" == 0).
+        #
+        # Gate: if ap == 0 the liquidation has not filled yet.  The order will
+        # fire again as a separate forceOrder event once it actually fills, so
+        # we skip here to avoid double-counting phantom notional.
+        ap = float(o.get("ap") or 0)
+        if ap == 0:
+            return  # order not filled yet — wait for the fill event
+        qty = float(o.get("z") or o.get("q") or 0)  # filled qty, fallback to original
+        usd = qty * ap
+        if usd <= 0:
+            return
         side  = "short" if o.get("S") == "BUY" else "long"
-        price = float(o.get("ap") or o.get("p") or 0)
-        usd   = float(o.get("q", 0)) * price
+        price = ap
         await self._strategy.on_liquidation("binance", side, usd, price, o.get("s", ""), event_sym)
         if event_sym == self._s.symbol:
             await self._impact.on_liquidation("binance", side, usd, price)
@@ -735,7 +755,6 @@ class ConnectionManager:
                             is_buy = t.get("side") == "BUY"
                             ts_s   = t.get("createdAt", "")
                             try:
-                                from datetime import datetime, timezone
                                 dt    = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
                                 ts_ms = int(dt.timestamp() * 1000)
                             except Exception:
