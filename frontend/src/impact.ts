@@ -24,6 +24,11 @@ let _charts: Record<string, any> = {};
 // ---- selection state ----
 const _checkedIds = new Set<string>();
 
+// Track which IDs were optimistically deleted so the next WS broadcast
+// (which only carries the last 50 rows) doesn't re-add them before the
+// backend confirms the delete via a full sync.
+const _pendingDeleteIds = new Set<string>();
+
 // ---- public API ----
 
 export function initImpactTab(): void {
@@ -58,15 +63,49 @@ export function initImpactTab(): void {
   document.getElementById('imp-delete-btn')?.addEventListener('click', deleteSelected);
 }
 
+/**
+ * Called on every WS impact_update message.
+ *
+ * The server sends only the most recent 50 observations to keep the socket
+ * payload small. We must NOT replace _allObs wholesale — that would discard
+ * the older rows the frontend already holds.
+ *
+ * Merge strategy:
+ *   1. Build a map of incoming observations keyed by id.
+ *   2. Update-in-place any existing entry whose id matches (e.g. a recording
+ *      obs that just closed and now has final_expected_price filled in).
+ *   3. Prepend any brand-new ids that aren't in _allObs yet.
+ *   4. Strip out any ids still in _pendingDeleteIds (ghost guard: the WS
+ *      confirmation of a delete we already applied optimistically).
+ */
 export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
-  _allObs = obs;
-  _stats  = stats;
+  _stats = stats;
+
+  // Build incoming map for O(1) lookup
+  const incoming = new Map<string, ImpactObs>(obs.map(o => [o.id, o]));
+
+  // 1. Update existing entries in-place
+  for (let i = 0; i < _allObs.length; i++) {
+    const fresh = incoming.get(_allObs[i].id);
+    if (fresh) _allObs[i] = fresh;
+  }
+
+  // 2. Prepend genuinely new entries (not already in _allObs)
+  const existingIds = new Set(_allObs.map(o => o.id));
+  const newEntries  = obs.filter(o => !existingIds.has(o.id));
+  if (newEntries.length) _allObs = [...newEntries, ..._allObs];
+
+  // 3. Remove anything still pending deletion (guard against WS echo)
+  if (_pendingDeleteIds.size) {
+    _allObs = _allObs.filter(o => !_pendingDeleteIds.has(o.id));
+  }
+
   renderStats();
   renderTable();
 
   // Live-refresh open detail panel
   if (_selectedId) {
-    const current = obs.find(o => o.id === _selectedId);
+    const current = _allObs.find(o => o.id === _selectedId);
     if (current) {
       fillDetailHeader(current);
       renderCutoffBanner(current);
@@ -75,7 +114,7 @@ export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
   }
 
   const empty = document.getElementById('imp-empty-state');
-  if (empty) empty.style.display = obs.length === 0 ? 'flex' : 'none';
+  if (empty) empty.style.display = _allObs.length === 0 ? 'flex' : 'none';
 }
 
 // ---- selection helpers ----
@@ -115,21 +154,30 @@ async function deleteSelected(): Promise<void> {
 
   const ids = [..._checkedIds];
 
+  // Mark as pending so the imminent WS echo doesn't re-add them
+  ids.forEach(id => _pendingDeleteIds.add(id));
+
   // Optimistic: remove from local view immediately so the UI feels instant
   _allObs = _allObs.filter(o => !_checkedIds.has(o.id));
   if (_selectedId && _checkedIds.has(_selectedId)) closeDetail();
   _checkedIds.clear();
+
+  // Reset to page 1 so we never land on a now-empty ghost page
+  _page = 1;
+
   renderStats();
   renderTable();
   syncDeleteBtn();
 
-  // Persist to backend — fire and forget (WS broadcast will confirm)
+  // Persist to backend
   try {
     await api.deleteImpact(ids);
+    // Backend confirmed — safe to clear the pending guard
+    ids.forEach(id => _pendingDeleteIds.delete(id));
   } catch (err) {
     console.error('[impact] deleteImpact API call failed:', err);
-    // The WS impact_update that follows the backend delete will
-    // re-sync state automatically. No manual rollback needed.
+    // Keep _pendingDeleteIds populated — WS will re-sync state
+    // and the guard will keep the UI consistent until that happens.
   }
 }
 
@@ -239,7 +287,6 @@ function renderTable(): void {
 
 // ---- detail panel ----
 
-// Defer chart render until after the CSS panel-open height transition (~220ms).
 const PANEL_OPEN_DELAY_MS = 280;
 
 function openDetail(id: string): void {
@@ -248,7 +295,7 @@ function openDetail(id: string): void {
   const obs = _allObs.find(o => o.id === id);
   if (!obs) return;
 
-  const wasOpen = _selectedId !== null;  // panel already visible, no transition
+  const wasOpen = _selectedId !== null;
   _selectedId = id;
 
   document.querySelectorAll('.imp-row').forEach(r =>
@@ -259,9 +306,6 @@ function openDetail(id: string): void {
   fillDetailHeader(obs);
   renderCutoffBanner(obs);
 
-  // Only wait for the CSS height transition when the panel is newly opening.
-  // When switching between observations the panel is already fully laid out —
-  // delaying causes a race where the timeout fires into a stale render cycle.
   const delay = wasOpen ? 0 : PANEL_OPEN_DELAY_MS;
   setTimeout(() => {
     if (_selectedId !== id) return;
@@ -364,11 +408,9 @@ function renderCutoffBanner(obs: ImpactObs): void {
 
 // ---- detail charts ----
 
-/** Destroy existing Chart.js instances and clear the canvas pixels. */
 function destroyCharts(): void {
   for (const c of Object.values(_charts)) c?.destroy?.();
   _charts = {};
-  // Explicitly clear each canvas so stale pixels don't show through the next render.
   for (const id of ['imp-chart-delta', 'imp-chart-expected', 'imp-chart-price', 'imp-chart-tank']) {
     const canvas = document.getElementById(id) as HTMLCanvasElement | null;
     if (canvas) {
@@ -378,16 +420,6 @@ function destroyCharts(): void {
   }
 }
 
-/**
- * Get a canvas element by ID, destroying any Chart.js instance already
- * registered on it first.
- *
- * Chart.js v4 maintains an internal canvas registry. Calling chart.destroy()
- * on our own reference is not enough when switching observations — the old
- * instance can still be registered on the canvas element itself, causing the
- * next new Chart() call to silently fail. Chart.getChart(canvas) looks up
- * the registry directly and is the only reliable way to clear it.
- */
 function getCanvas(id: string): HTMLCanvasElement | null {
   const canvas = document.getElementById(id) as HTMLCanvasElement | null;
   if (!canvas) return null;
@@ -404,7 +436,6 @@ function renderDetailCharts(obs: ImpactObs): void {
   const origin        = obs.timestamp;
   const cascadeEvents = obs.cascade_events ?? [];
 
-  // ---- Chart 1: Volume Delta ----
   const deltaSeries = obs.delta_series;
   if (deltaSeries && deltaSeries.length > 1) {
     const labels = elapsedLabels(deltaSeries, origin);
@@ -435,7 +466,6 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // ---- Chart 2: Predicted Terminal Price ----
   const expSeries = obs.expected_price_series;
   if (expSeries && expSeries.length > 1) {
     const labels        = elapsedLabels(expSeries, origin);
@@ -493,7 +523,6 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // ---- Chart 3: Actual Price ----
   const priceSeries = obs.price_series;
   if (priceSeries && priceSeries.length > 1) {
     const labels = elapsedLabels(priceSeries, origin);
@@ -518,7 +547,6 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // ---- Chart 4: LIQ Remaining ----
   const liqSeries = obs.liq_remaining_series;
   if (liqSeries && liqSeries.length > 1) {
     const labels    = elapsedLabels(liqSeries, origin);
