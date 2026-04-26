@@ -9,6 +9,7 @@ import {
 import {
   initControls, initConnDots,
   updatePrice, updatePhase, updateStats, updateCascadeMeter,
+  updateBarDelta,
   updateConnDot, prependFeedItem, renderFeed, renderLog, prependLogItem,
   updateCandleLabel, updateStatusBar,
 } from './ui';
@@ -97,13 +98,6 @@ initControls(
       }
     } catch (_e) {}
   },
-  // FIX Bug 13: TF change handler now immediately clears and resets charts
-  // instead of waiting silently for the next WS history push.
-  // Flow:
-  //   1. Tell backend to switch TF (triggers a 'history' WS broadcast).
-  //   2. Immediately wipe state + flush empty series so no stale data shows.
-  //   3. Update header label right away.
-  //   4. The incoming 'history' WS message repopulates everything normally.
   async (tf) => {
     _lastSwitch = Date.now();
     prependLogItem({ msg: `Switching to ${tf} timeframe...`, type: 'sys', ts: Date.now() });
@@ -163,6 +157,9 @@ onMessage((msg: ServerMsg) => {
       updatePrice(state.price);
       updatePhase(state.phase);
       updateStats(msg.stats);
+      // Show current-candle bar delta from the last delta bar
+      const lastDBar = state.delta_bars.at(-1);
+      if (lastDBar) updateBarDelta(lastDBar.delta);
       if (msg.conn_status) {
         for (const [ex, status] of Object.entries(msg.conn_status)) {
           state.conn_status[ex] = status;
@@ -201,6 +198,8 @@ onMessage((msg: ServerMsg) => {
         updateLiqChart(state.liq_bars);
         updateDeltaChart(state.delta_bars);
         updateStatusBar({ candles: state.candles.length, lastUpdate: true });
+        // New candle opened — bar delta resets to 0
+        updateBarDelta(0);
       }
       break;
     }
@@ -221,13 +220,6 @@ onMessage((msg: ServerMsg) => {
           state.delta_bars.shift();
         }
       }
-      // FIX Bug 14: use updateLastBar (series.update) instead of full
-      // updatePriceChart (series.setData) on every trade tick.
-      // series.setData() is O(n) and rebuilds the entire chart — at BTC
-      // trade volume (thousands of ticks/sec) this caused severe CPU spikes
-      // and visible chart lag. series.update() paints only the last bar: O(1).
-      // Full setData is still used for history/snapshot/kline/candle_open
-      // where a complete series rebuild is correct.
       updateLastBar(c);
       updateStatusBar({ lastUpdate: true });
       break;
@@ -274,10 +266,14 @@ onMessage((msg: ServerMsg) => {
     }
 
     case 'delta': {
+      // Update stats cumulative for the impact model (internal state only)
       if (state.stats) {
         state.stats.cumulative_delta = msg.cum_delta;
-        updateStats(state.stats);
       }
+      // Update the strategy-bar display with the CURRENT CANDLE bar delta —
+      // this resets each candle and stays in a human-readable range.
+      updateBarDelta(msg.bar_delta);
+
       const last = state.delta_bars.at(-1);
       if (last) {
         last.delta     = msg.bar_delta;
@@ -339,6 +335,9 @@ onMessage((msg: ServerMsg) => {
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
       scrollToLatest();
+      // Refresh bar delta from last bar after history reload
+      const lastBar = state.delta_bars.at(-1);
+      if (lastBar) updateBarDelta(lastBar.delta);
       prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
@@ -358,14 +357,8 @@ onMessage((msg: ServerMsg) => {
       break;
     }
 
-    // ---- IMPACT TAB ----
     case 'impact_update': {
-      // Always keep state in sync so the tab switch handler has fresh data.
       state.impact_obs = msg.observations;
-      // FIX: Only push DOM updates (and expensive Chart.js destroy+recreate)
-      // when the IMPACT tab is actually visible. Previously this ran on every
-      // backend push regardless of which tab was open, burning CPU recreating
-      // 4 Chart.js instances in the background on every liquidation event.
       if (impactTabVisible()) {
         updateImpact(msg.observations, msg.stats);
       }
