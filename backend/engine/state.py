@@ -10,11 +10,6 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 
-# FIX: raised from 300 to 1500 to match the frontend trim limit in main.ts.
-# The previous mismatch caused permanent state divergence after ~5 h of
-# uptime: the frontend held up to 1500 candles while the backend silently
-# discarded everything beyond 300, making history reloads return a much
-# shorter series than the client already had rendered.
 MAX_CANDLES = 1500
 
 TF_MINUTES: dict[str, int] = {
@@ -187,12 +182,17 @@ class AppState:
     liq_store:   dict = field(default_factory=lambda: defaultdict(list))
     delta_store: dict = field(default_factory=lambda: defaultdict(list))
 
-    # Per-symbol live price and cumulative delta used by ImpactRecorder
-    # so _tick_all can read the correct mid-price and delta for each
-    # symbol's active observation regardless of which symbol is displayed.
-    # Populated by Strategy.update_price_tick and Strategy.update_delta.
+    # Per-symbol live price — updated by every exchange's trade handler.
     sym_price: dict = field(default_factory=dict)   # sym -> float
-    sym_delta: dict = field(default_factory=dict)   # sym -> float
+
+    # Per-symbol current-second net flow (all exchanges combined).
+    # Resets every time the wall-clock second advances for that symbol.
+    # This is a true instantaneous snapshot: the sum of all signed trade
+    # notionals that arrived in the current second across all 6 exchanges,
+    # independent of any candle boundary or running accumulator.
+    # ImpactRecorder reads this at the moment a liquidation fires to get
+    # the real-time directional pressure for the L2 model.
+    sym_snapshot_delta: dict = field(default_factory=dict)  # sym -> float
 
     def reset_stats(self):
         self.total_liq         = 0.0
@@ -215,5 +215,4 @@ class AppState:
         self.feed_count        = 0
         self.signal_log        = []
         self.exchanges         = _default_exchanges()
-        # Note: sym_price and sym_delta are NOT reset — they are global
-        # cross-symbol trackers and must survive active-symbol switches.
+        # sym_price and sym_snapshot_delta survive symbol switches.
