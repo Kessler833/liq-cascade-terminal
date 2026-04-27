@@ -1,27 +1,41 @@
 """Cascade Impact recorder — with SQLite persistence.
 
-Records per-cascade observations: entry price, liq volume, predicted vs actual
-terminal price, delta series, price series, and liq-remaining tank.
-
 Algorithm
 ---------
-The model has two completely separate components:
+Two completely separate components:
 
 1. Tank (liq_remaining)
-   Updated every tick using real market flow:
+   Updated every 200ms tick using real per-tick market flow:
        liq_remaining = max(0, liq_remaining - direction * delta_tick)
-   where delta_tick = net buy/sell flow in the last 200ms window only.
-   For a long liq: positive delta (net buying) drains the tank.
-   For a short liq: negative delta (net selling) drains the tank.
+   delta_tick = increment of net buy/sell flow in this 200ms window only.
+   Long liq: positive delta_tick (net buying) drains the tank.
+   Short liq: negative delta_tick (net selling) drains the tank.
+   Amplifying flow (same direction as forced flow) refills the tank.
    The bucket walk NEVER modifies liq_remaining.
 
-2. Bucket walk (read-only prediction)
-   Given the current liq_remaining, walks L2 buckets from current price
-   to predict where the forced volume would exhaust. Changes no state.
+   If a new liquidation arrives within the silence window, the tank is
+   refilled: liq_remaining += new_usd_val. The tank_empty markers are
+   reset so they get re-recorded at the next true depletion.
 
-The observation closes only when the silence window expires (no new
-liquidation within 30 seconds). The tank hitting zero does NOT close
-the observation — a new cascade cluster may refill it.
+2. Bucket walk (read-only prediction)
+   Given the current liq_remaining, walks L2 buckets to predict the
+   terminal price. Changes no state whatsoever.
+
+Key field definitions
+---------------------
+entry_price             — price when the first liquidation fired (START)
+initial_expected_price  — first bucket walk prediction when liq fires
+final_expected_price    — bucket walk prediction at the exact tick
+                          liq_remaining first hits zero
+tank_empty_ts           — wall-clock timestamp when liq_remaining → 0
+tank_empty_price        — real market price at that moment (END)
+price_difference        — tank_empty_price - entry_price (actual move)
+cascade_duration_s      — tank_empty_ts - obs.timestamp
+price_error_pct         — (final_expected - initial_expected) / entry_price * 100
+absorbed_by_delta       — tank drained to zero by counter-flow delta
+
+Observation closes only on silence_expired (30s no new liq).
+Tank hitting zero does NOT close — a new cluster may refill it.
 """
 from __future__ import annotations
 
@@ -50,7 +64,8 @@ INSERT OR REPLACE INTO cascade_observations (
     obs_id, asset, timestamp, entry_price, side, exchange,
     cascade_size, initial_liq_volume, initial_delta, initial_expected_price,
     total_liq_volume, liq_remaining, last_liq_ts,
-    final_expected_price, actual_terminal_price, price_error_pct,
+    final_expected_price, tank_empty_ts, tank_empty_price, price_difference,
+    actual_terminal_price, price_error_pct,
     cascade_duration_s, absorbed_by_delta,
     delta_series, expected_price_series, price_series,
     liq_remaining_series, cascade_events_json, label_filled
@@ -58,7 +73,8 @@ INSERT OR REPLACE INTO cascade_observations (
     :obs_id, :asset, :timestamp, :entry_price, :side, :exchange,
     :cascade_size, :initial_liq_volume, :initial_delta, :initial_expected_price,
     :total_liq_volume, :liq_remaining, :last_liq_ts,
-    :final_expected_price, :actual_terminal_price, :price_error_pct,
+    :final_expected_price, :tank_empty_ts, :tank_empty_price, :price_difference,
+    :actual_terminal_price, :price_error_pct,
     :cascade_duration_s, :absorbed_by_delta,
     :delta_series, :expected_price_series, :price_series,
     :liq_remaining_series, :cascade_events_json, :label_filled
@@ -71,10 +87,6 @@ def _gen_id() -> str:
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
     return f"{ts:x}{rand}"
 
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
 
 def _jdump(val) -> str | None:
     return json.dumps(val) if val else None
@@ -100,6 +112,9 @@ def _obs_to_db_row(obs: dict) -> dict:
         "liq_remaining":          obs.get("liq_remaining", 0.0),
         "last_liq_ts":            obs.get("last_liq_ts"),
         "final_expected_price":   obs.get("final_expected_price"),
+        "tank_empty_ts":          obs.get("tank_empty_ts"),
+        "tank_empty_price":       obs.get("tank_empty_price"),
+        "price_difference":       obs.get("price_difference"),
         "actual_terminal_price":  obs.get("actual_terminal_price"),
         "price_error_pct":        obs.get("price_error_pct"),
         "cascade_duration_s":     obs.get("cascade_duration_s"),
@@ -129,6 +144,9 @@ def _db_row_to_obs(row: dict) -> dict:
         "liq_remaining":          row.get("liq_remaining", 0.0),
         "last_liq_ts":            row.get("last_liq_ts") or row["timestamp"],
         "final_expected_price":   row.get("final_expected_price"),
+        "tank_empty_ts":          row.get("tank_empty_ts"),
+        "tank_empty_price":       row.get("tank_empty_price"),
+        "price_difference":       row.get("price_difference"),
         "actual_terminal_price":  row.get("actual_terminal_price"),
         "price_error_pct":        row.get("price_error_pct"),
         "cascade_duration_s":     row.get("cascade_duration_s"),
@@ -141,14 +159,9 @@ def _db_row_to_obs(row: dict) -> dict:
         "label_filled":           row.get("label_filled", 1),
         "beyond_cutoff":          False,
         "cutoff_price":           None,
-        # Internal tick state — not persisted
         "_last_delta":            0.0,
     }
 
-
-# ---------------------------------------------------------------------------
-# ImpactRecorder
-# ---------------------------------------------------------------------------
 
 class ImpactRecorder:
     def __init__(
@@ -173,7 +186,7 @@ class ImpactRecorder:
                 (limit,),
             )
         except Exception as exc:
-            log.warning("load_from_db failed (DB not ready?): %s", exc)
+            log.warning("load_from_db failed: %s", exc)
             return
         self.observations = [_db_row_to_obs(r) for r in rows]
         log.info("Loaded %d observations from DB", len(self.observations))
@@ -200,12 +213,8 @@ class ImpactRecorder:
             )
         if removed:
             await self._broadcast_table_update()
-            log.info("Deleted %d observation(s): %s", removed, ids)
         return removed
 
-    # ------------------------------------------------------------------
-    # on_liquidation
-    # ------------------------------------------------------------------
     async def on_liquidation(
         self,
         exchange: str,
@@ -222,62 +231,63 @@ class ImpactRecorder:
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
-            # Extend existing cascade — refill the tank
+            # Refill the tank
             active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
             active["cascade_events"].append([now, usd_val, exchange])
+            # Reset tank-empty markers — tank is alive again
+            active["tank_empty_ts"]        = None
+            active["tank_empty_price"]     = None
+            active["final_expected_price"] = None
+            active["cascade_duration_s"]   = None
+            active["price_difference"]     = None
         else:
             if self._tick_task is None or self._tick_task.done():
                 self._tick_task = asyncio.create_task(self._tick_loop())
-
             if active:
                 await self._close_obs(sym)
 
-            # Initial prediction: bucket walk with full liquidation size
-            # Delta is NOT mixed into the initial tank — tank starts at
-            # the raw liquidation notional only.
             current_delta = self._s.sym_snapshot_delta.get(sym, 0.0)
             res = self._l2.compute_terminal_price(usd_val, side, sym=sym)
 
             obs = {
-                "id":                    _gen_id(),
-                "asset":                 sym,
-                "timestamp":             now,
-                "entry_price":           price,
-                "side":                  side,
-                "exchange":              exchange,
-                "cascade_size":          1,
-                "initial_liq_volume":    usd_val,
-                "initial_delta":         current_delta,
+                "id":                     _gen_id(),
+                "asset":                  sym,
+                "timestamp":              now,
+                "entry_price":            price,
+                "side":                   side,
+                "exchange":               exchange,
+                "cascade_size":           1,
+                "initial_liq_volume":     usd_val,
+                "initial_delta":          current_delta,
                 "initial_expected_price": res["terminal_price"],
-                # Tank starts at the raw liquidation size — delta will
-                # drain it each tick via _tick_all
-                "total_liq_volume":      usd_val,
-                "liq_remaining":         usd_val,
-                "last_liq_ts":           now,
-                "delta_series":          [],
-                "expected_price_series": [],
-                "price_series":          [],
-                "liq_remaining_series":  [],
-                "beyond_cutoff":         res["beyond_cutoff"],
-                "cutoff_price":          res["cutoff_price"],
-                "cascade_events":        [[now, usd_val, exchange]],
-                "final_expected_price":  None,
-                "actual_terminal_price": None,
-                "price_error_pct":       None,
-                "cascade_duration_s":    None,
-                "absorbed_by_delta":     False,
-                "label_filled":          0,
-                # Internal: last delta reading used to compute per-tick increment
-                "_last_delta":           current_delta,
+                "total_liq_volume":       usd_val,
+                "liq_remaining":          usd_val,
+                "last_liq_ts":            now,
+                "tank_empty_ts":          None,
+                "tank_empty_price":       None,
+                "price_difference":       None,
+                "final_expected_price":   None,
+                "cascade_duration_s":     None,
+                "actual_terminal_price":  None,
+                "price_error_pct":        None,
+                "absorbed_by_delta":      False,
+                "label_filled":           0,
+                "delta_series":           [],
+                "expected_price_series":  [],
+                "price_series":           [],
+                "liq_remaining_series":   [],
+                "beyond_cutoff":          res["beyond_cutoff"],
+                "cutoff_price":           res["cutoff_price"],
+                "cascade_events":         [[now, usd_val, exchange]],
+                "_last_delta":            current_delta,
             }
             self.active[sym] = obs
 
         await self._broadcast_table_update()
 
-    # ------------------------------------------------------------------
     async def _tick_loop(self):
         while True:
             await asyncio.sleep(TICK_INTERVAL_S)
@@ -293,45 +303,44 @@ class ImpactRecorder:
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
-            # ----------------------------------------------------------
-            # Step 1: Update the tank using real per-tick market flow.
-            #
-            # delta_tick = net buy/sell flow in this 200ms window only.
-            # We derive it by comparing the current snapshot delta to
-            # what it was on the previous tick, giving the increment.
-            #
-            # For a long liq (forced selling):
-            #   positive delta_tick = net buying = absorbs forced selling
-            #   → tank drains (subtract)
-            # For a short liq (forced buying):
-            #   negative delta_tick = net selling = absorbs forced buying
-            #   → tank drains (direction = -1, so subtract flips to add)
-            #
-            # Formula: liq_remaining -= direction * delta_tick
-            # ----------------------------------------------------------
-            current_delta = self._s.sym_snapshot_delta.get(sym, 0.0)
-            last_delta    = obs.get("_last_delta", current_delta)
-            delta_tick    = current_delta - last_delta
+            # Step 1: Update the tank with this tick's real market flow.
+            # delta_tick = increment since last tick (not the full second).
+            current_delta  = self._s.sym_snapshot_delta.get(sym, 0.0)
+            last_delta     = obs.get("_last_delta", current_delta)
+            delta_tick     = current_delta - last_delta
             obs["_last_delta"] = current_delta
 
-            direction = 1.0 if obs["side"] == "long" else -1.0
+            direction      = 1.0 if obs["side"] == "long" else -1.0
+            prev_remaining = obs["liq_remaining"]
             obs["liq_remaining"] = max(
                 0.0,
                 obs["liq_remaining"] - direction * delta_tick
             )
 
-            # Track if the tank was fully absorbed by counter-flow
-            if obs["liq_remaining"] == 0.0 and not obs["absorbed_by_delta"]:
-                obs["absorbed_by_delta"] = True
-
-            # ----------------------------------------------------------
-            # Step 2: Read-only bucket walk.
-            # Uses current liq_remaining to predict terminal price.
-            # This changes NO state — it is purely a forward estimate.
-            # ----------------------------------------------------------
+            # Step 2: Read-only bucket walk — purely a prediction.
             res = self._l2.compute_terminal_price(
                 obs["liq_remaining"], obs["side"], sym=sym
             )
+
+            # Step 3: Record the exact moment the tank first hits zero.
+            # This is the core output of the whole model.
+            if (
+                obs["liq_remaining"] == 0.0
+                and prev_remaining > 0.0
+                and obs.get("tank_empty_ts") is None
+            ):
+                obs["tank_empty_ts"]        = now
+                obs["tank_empty_price"]     = sym_price
+                obs["final_expected_price"] = res["terminal_price"]
+                obs["cascade_duration_s"]   = now - obs["timestamp"]
+                obs["absorbed_by_delta"]    = True
+                obs["price_difference"]     = sym_price - obs["entry_price"]
+
+                if obs["entry_price"] and obs["initial_expected_price"] is not None:
+                    obs["price_error_pct"] = (
+                        (res["terminal_price"] - obs["initial_expected_price"])
+                        / obs["entry_price"] * 100
+                    )
 
             # Record time series
             obs["delta_series"].append([now, delta_tick])
@@ -344,13 +353,8 @@ class ImpactRecorder:
             if res["cutoff_price"] is not None:
                 obs["cutoff_price"] = res["cutoff_price"]
 
-            # ----------------------------------------------------------
-            # Closing condition: silence only.
-            # Tank hitting zero does NOT close — a new cascade cluster
-            # may arrive and refill it within the silence window.
-            # ----------------------------------------------------------
-            silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
-            if silence_expired:
+            # Only silence closes the observation
+            if now - obs["last_liq_ts"] > SILENCE_WINDOW_S:
                 to_close.append(sym)
 
         for sym in to_close:
@@ -361,40 +365,45 @@ class ImpactRecorder:
         if obs is None:
             return
         now = time.time()
-        obs["label_filled"] = 1
-        obs["final_expected_price"] = (
-            obs["expected_price_series"][-1][1]
-            if obs["expected_price_series"]
-            else obs["initial_expected_price"]
-        )
-        obs["actual_terminal_price"] = (
-            self._s.sym_price.get(sym) or self._s.price
-        )
-        if obs["entry_price"]:
-            obs["price_error_pct"] = (
-                (obs["actual_terminal_price"] - obs["final_expected_price"])
-                / obs["entry_price"] * 100
+        obs["label_filled"]          = 1
+        obs["actual_terminal_price"] = self._s.sym_price.get(sym) or self._s.price
+
+        # If tank never hit zero before silence closed the obs, fill in
+        # terminal fields with best available data at close time.
+        if obs.get("tank_empty_ts") is None:
+            obs["tank_empty_ts"]        = now
+            obs["tank_empty_price"]     = obs["actual_terminal_price"]
+            obs["price_difference"]     = obs["tank_empty_price"] - obs["entry_price"]
+            obs["final_expected_price"] = (
+                obs["expected_price_series"][-1][1]
+                if obs["expected_price_series"]
+                else obs["initial_expected_price"]
             )
-        obs["cascade_duration_s"] = now - obs["timestamp"]
+            obs["cascade_duration_s"] = now - obs["timestamp"]
+            if obs["entry_price"] and obs["initial_expected_price"] is not None:
+                obs["price_error_pct"] = (
+                    (obs["final_expected_price"] - obs["initial_expected_price"])
+                    / obs["entry_price"] * 100
+                )
 
-        # Strip internal tick state before persisting
         obs.pop("_last_delta", None)
-
         self.observations.insert(0, obs)
         self._persist_obs(obs)
         await self._broadcast_table_update()
 
-    # ------------------------------------------------------------------
     def get_all(self) -> list[dict]:
         return list(self.active.values()) + self.observations
 
     def to_serialisable(self, obs: dict) -> dict:
         def ts(t: float) -> int:
             return int(t * 1000)
+        def tsn(t) -> int | None:
+            return int(t * 1000) if t is not None else None
         return {
             **obs,
             "timestamp":             ts(obs["timestamp"]),
             "last_liq_ts":           ts(obs["last_liq_ts"]),
+            "tank_empty_ts":         tsn(obs.get("tank_empty_ts")),
             "delta_series":          [[ts(t), v] for t, v in obs["delta_series"]],
             "expected_price_series": [[ts(t), v] for t, v in obs["expected_price_series"]],
             "price_series":          [[ts(t), v] for t, v in obs["price_series"]],
