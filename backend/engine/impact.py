@@ -3,28 +3,25 @@
 Records per-cascade observations: entry price, liq volume, predicted vs actual
 terminal price, delta series, price series, and liq-remaining tank.
 
-Key fixes vs original
----------------------
-liq_remaining depletion
-    Previously used obs["liq_remaining"] * 0.97 per 200ms tick — a fake
-    exponential decay that always hit zero at ~22s regardless of the actual
-    liquidation size or market depth.  Now uses pressure_remaining returned
-    by compute_terminal_price: the portion of total_pressure that the L2
-    book could NOT absorb.  This gives real stepped depletion tied to actual
-    book consumption — large liqs against thin books stay high longer; small
-    liqs against deep books drop to zero quickly.
+Algorithm
+---------
+The model has two completely separate components:
 
-absorbed flag
-    Previously compared snapshot_delta against the current (decayed)
-    liq_remaining, which became nearly zero by second 24 causing every
-    observation to be falsely tagged as absorbed.  Now compared against
-    initial_liq_volume, which never changes.
+1. Tank (liq_remaining)
+   Updated every tick using real market flow:
+       liq_remaining = max(0, liq_remaining - direction * delta_tick)
+   where delta_tick = net buy/sell flow in the last 200ms window only.
+   For a long liq: positive delta (net buying) drains the tank.
+   For a short liq: negative delta (net selling) drains the tank.
+   The bucket walk NEVER modifies liq_remaining.
 
-cascade_duration_s
-    Previously events[-1] - events[0]: the time span between cascade join
-    events, which is 0 for a single event.  Now the total recording time:
-    close_time - obs["timestamp"], which is the actual duration from cascade
-    onset until the observation was closed.
+2. Bucket walk (read-only prediction)
+   Given the current liq_remaining, walks L2 buckets from current price
+   to predict where the forced volume would exhaust. Changes no state.
+
+The observation closes only when the silence window expires (no new
+liquidation within 30 seconds). The tank hitting zero does NOT close
+the observation — a new cascade cluster may refill it.
 """
 from __future__ import annotations
 
@@ -144,6 +141,8 @@ def _db_row_to_obs(row: dict) -> dict:
         "label_filled":           row.get("label_filled", 1),
         "beyond_cutoff":          False,
         "cutoff_price":           None,
+        # Internal tick state — not persisted
+        "_last_delta":            0.0,
     }
 
 
@@ -182,45 +181,26 @@ class ImpactRecorder:
     def _persist_obs(self, obs: dict) -> None:
         _db.execute_nonblocking(_INSERT_SQL, _obs_to_db_row(obs))
 
-    # ---------------------------------------------------------------------------
-    # delete_observations — remove by ID from memory + DB, broadcast update
-    # ---------------------------------------------------------------------------
-
     async def delete_observations(self, ids: list[str]) -> int:
-        """Delete observations by obs_id from in-memory store and SQLite.
-
-        Returns the number of observations actually removed.
-        Active (still-recording) observations whose ID matches are also evicted.
-        """
         if not ids:
             return 0
-
         id_set = set(ids)
-
-        # Remove from completed observations list
         before = len(self.observations)
         self.observations = [o for o in self.observations if o["id"] not in id_set]
         removed = before - len(self.observations)
-
-        # Also evict any matching active observations
         for sym in list(self.active):
             if self.active[sym]["id"] in id_set:
                 del self.active[sym]
                 removed += 1
-
-        # Persist: delete from SQLite using a parameterised IN clause.
-        # SQLite doesn't support array binding, so we build the placeholders.
         if ids:
             placeholders = ",".join("?" * len(ids))
             await _db.execute(
                 f"DELETE FROM cascade_observations WHERE obs_id IN ({placeholders})",
                 tuple(ids),
             )
-
         if removed:
             await self._broadcast_table_update()
             log.info("Deleted %d observation(s): %s", removed, ids)
-
         return removed
 
     # ------------------------------------------------------------------
@@ -242,6 +222,7 @@ class ImpactRecorder:
         active = self.active.get(sym)
 
         if active and now - active["last_liq_ts"] < SILENCE_WINDOW_S:
+            # Extend existing cascade — refill the tank
             active["cascade_size"]     += 1
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
@@ -254,8 +235,11 @@ class ImpactRecorder:
             if active:
                 await self._close_obs(sym)
 
-            delta = self._s.sym_snapshot_delta.get(sym, 0.0)
-            res   = self._l2.compute_terminal_price(usd_val, delta, side, sym=sym)
+            # Initial prediction: bucket walk with full liquidation size
+            # Delta is NOT mixed into the initial tank — tank starts at
+            # the raw liquidation notional only.
+            current_delta = self._s.sym_snapshot_delta.get(sym, 0.0)
+            res = self._l2.compute_terminal_price(usd_val, side, sym=sym)
 
             obs = {
                 "id":                    _gen_id(),
@@ -266,10 +250,12 @@ class ImpactRecorder:
                 "exchange":              exchange,
                 "cascade_size":          1,
                 "initial_liq_volume":    usd_val,
-                "initial_delta":         delta,
+                "initial_delta":         current_delta,
                 "initial_expected_price": res["terminal_price"],
+                # Tank starts at the raw liquidation size — delta will
+                # drain it each tick via _tick_all
                 "total_liq_volume":      usd_val,
-                "liq_remaining":         res["pressure_remaining"],
+                "liq_remaining":         usd_val,
                 "last_liq_ts":           now,
                 "delta_series":          [],
                 "expected_price_series": [],
@@ -284,6 +270,8 @@ class ImpactRecorder:
                 "cascade_duration_s":    None,
                 "absorbed_by_delta":     False,
                 "label_filled":          0,
+                # Internal: last delta reading used to compute per-tick increment
+                "_last_delta":           current_delta,
             }
             self.active[sym] = obs
 
@@ -301,19 +289,52 @@ class ImpactRecorder:
     async def _tick_all(self):
         now      = time.time()
         to_close = []
+
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
-            delta     = self._s.sym_snapshot_delta.get(sym, 0.0)
 
-            # Recompute terminal price using current liq_remaining.
-            # pressure_remaining replaces liq_remaining — this is actual
-            # L2-based depletion, not an arbitrary exponential decay.
-            res = self._l2.compute_terminal_price(
-                obs["liq_remaining"], delta, obs["side"], sym=sym
+            # ----------------------------------------------------------
+            # Step 1: Update the tank using real per-tick market flow.
+            #
+            # delta_tick = net buy/sell flow in this 200ms window only.
+            # We derive it by comparing the current snapshot delta to
+            # what it was on the previous tick, giving the increment.
+            #
+            # For a long liq (forced selling):
+            #   positive delta_tick = net buying = absorbs forced selling
+            #   → tank drains (subtract)
+            # For a short liq (forced buying):
+            #   negative delta_tick = net selling = absorbs forced buying
+            #   → tank drains (direction = -1, so subtract flips to add)
+            #
+            # Formula: liq_remaining -= direction * delta_tick
+            # ----------------------------------------------------------
+            current_delta = self._s.sym_snapshot_delta.get(sym, 0.0)
+            last_delta    = obs.get("_last_delta", current_delta)
+            delta_tick    = current_delta - last_delta
+            obs["_last_delta"] = current_delta
+
+            direction = 1.0 if obs["side"] == "long" else -1.0
+            obs["liq_remaining"] = max(
+                0.0,
+                obs["liq_remaining"] - direction * delta_tick
             )
-            obs["liq_remaining"] = res["pressure_remaining"]
 
-            obs["delta_series"].append([now, delta])
+            # Track if the tank was fully absorbed by counter-flow
+            if obs["liq_remaining"] == 0.0 and not obs["absorbed_by_delta"]:
+                obs["absorbed_by_delta"] = True
+
+            # ----------------------------------------------------------
+            # Step 2: Read-only bucket walk.
+            # Uses current liq_remaining to predict terminal price.
+            # This changes NO state — it is purely a forward estimate.
+            # ----------------------------------------------------------
+            res = self._l2.compute_terminal_price(
+                obs["liq_remaining"], obs["side"], sym=sym
+            )
+
+            # Record time series
+            obs["delta_series"].append([now, delta_tick])
             obs["expected_price_series"].append([now, res["terminal_price"]])
             obs["price_series"].append([now, sym_price])
             obs["liq_remaining_series"].append([now, obs["liq_remaining"]])
@@ -323,15 +344,13 @@ class ImpactRecorder:
             if res["cutoff_price"] is not None:
                 obs["cutoff_price"] = res["cutoff_price"]
 
-            # Absorption: total_pressure <= 0 means current-second counter-flow
-            # fully cancels remaining liq pressure — the exact condition from the
-            # model spec. l2_model returns absorbed=True when this occurs.
-            if res["absorbed"]:
-                obs["absorbed_by_delta"] = True
-
+            # ----------------------------------------------------------
+            # Closing condition: silence only.
+            # Tank hitting zero does NOT close — a new cascade cluster
+            # may arrive and refill it within the silence window.
+            # ----------------------------------------------------------
             silence_expired = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
-            tank_dry        = obs["liq_remaining"] <= 0
-            if silence_expired or tank_dry:
+            if silence_expired:
                 to_close.append(sym)
 
         for sym in to_close:
@@ -356,9 +375,10 @@ class ImpactRecorder:
                 (obs["actual_terminal_price"] - obs["final_expected_price"])
                 / obs["entry_price"] * 100
             )
-        # Recording duration: time from cascade onset to close.
-        # More useful than events[-1] - events[0] which is 0 for single events.
         obs["cascade_duration_s"] = now - obs["timestamp"]
+
+        # Strip internal tick state before persisting
+        obs.pop("_last_delta", None)
 
         self.observations.insert(0, obs)
         self._persist_obs(obs)
