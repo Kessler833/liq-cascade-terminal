@@ -1,8 +1,5 @@
 """DDL schema for liq-cascade-terminal SQLite persistence."""
 
-# ---------------------------------------------------------------------------
-# Table: cascade_observations  (primary ML / analysis table)
-# ---------------------------------------------------------------------------
 CREATE_CASCADE_OBSERVATIONS = """
 CREATE TABLE IF NOT EXISTS cascade_observations (
     obs_id                  TEXT PRIMARY KEY,
@@ -19,6 +16,9 @@ CREATE TABLE IF NOT EXISTS cascade_observations (
     liq_remaining           REAL,
     last_liq_ts             REAL,
     final_expected_price    REAL,
+    tank_empty_ts           REAL,
+    tank_empty_price        REAL,
+    price_difference        REAL,
     actual_terminal_price   REAL,
     price_error_pct         REAL,
     cascade_duration_s      REAL,
@@ -31,13 +31,7 @@ CREATE TABLE IF NOT EXISTS cascade_observations (
     label_filled            INTEGER NOT NULL DEFAULT 0
 )
 """
-# NOTE: no trailing semicolon inside the triple-quote — sqlite3.execute()
-# raises ProgrammingError("You can only execute one statement at a time")
-# if the string ends with a semicolon followed by whitespace.
 
-# ---------------------------------------------------------------------------
-# Table: liq_events  (raw per-liquidation-message log)
-# ---------------------------------------------------------------------------
 CREATE_LIQ_EVENTS = """
 CREATE TABLE IF NOT EXISTS liq_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,9 +44,6 @@ CREATE TABLE IF NOT EXISTS liq_events (
 )
 """
 
-# ---------------------------------------------------------------------------
-# Indexes
-# ---------------------------------------------------------------------------
 _IDX_OBS_LABEL_TS  = "CREATE INDEX IF NOT EXISTS idx_obs_label_ts    ON cascade_observations (label_filled, timestamp DESC)"
 _IDX_OBS_ASSET_TS  = "CREATE INDEX IF NOT EXISTS idx_obs_asset_ts    ON cascade_observations (asset, timestamp DESC)"
 _IDX_EVENTS_ASSET  = "CREATE INDEX IF NOT EXISTS idx_liq_events_asset ON liq_events (asset, timestamp)"
@@ -65,9 +56,6 @@ ALL_DDL = [
     *INDEXES,
 ]
 
-# ---------------------------------------------------------------------------
-# Migration manifest — additive ALTER TABLE ADD COLUMN
-# ---------------------------------------------------------------------------
 CASCADE_OBS_REQUIRED_COLUMNS: list[tuple[str, str]] = [
     ("obs_id",                  "TEXT"),
     ("asset",                   "TEXT NOT NULL"),
@@ -83,6 +71,9 @@ CASCADE_OBS_REQUIRED_COLUMNS: list[tuple[str, str]] = [
     ("liq_remaining",           "REAL"),
     ("last_liq_ts",             "REAL"),
     ("final_expected_price",    "REAL"),
+    ("tank_empty_ts",           "REAL"),
+    ("tank_empty_price",        "REAL"),
+    ("price_difference",        "REAL"),
     ("actual_terminal_price",   "REAL"),
     ("price_error_pct",         "REAL"),
     ("cascade_duration_s",      "REAL"),
