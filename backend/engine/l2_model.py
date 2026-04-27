@@ -6,40 +6,25 @@ estimates the terminal price a liquidation would reach.
 
 Key concepts
 ------------
-* Price buckets  — raw levels are rounded to a per-symbol bucket size
+* compute_terminal_price is READ-ONLY.
+  It takes liq_notional and walks the book to produce a price estimate.
+  It does NOT take delta as an input. Delta is handled entirely in
+  ImpactRecorder._tick_all before this function is called. The tank
+  (liq_remaining) has already been updated by delta when this runs.
+  This function changes no state and never feeds back into liq_remaining.
+
+* Price buckets — raw levels are rounded to a per-symbol bucket size
   (e.g. $10 for BTC, $0.05 for SOL) and summed.
+
 * Exchange coverage — each bucket tracks how many exchanges contributed.
   The data cutoff price is the deepest level where every REST-accessible
-  exchange (5 of 6 — dYdX has no public book API) still contributes.
+  exchange still contributes.
+
 * beyond_cutoff flag — when the terminal price estimate crosses the
   cutoff, the result carries beyond_cutoff=True and cutoff_price.
+
 * Multi-symbol — books for ALL symbols are refreshed every REFRESH_S
   seconds in parallel.
-
-Delta sign convention
----------------------
-snapshot_delta follows the standard convention:
-    positive = net buying pressure (buyers > sellers this second)
-    negative = net selling pressure (sellers > buyers this second)
-
-For a LONG liquidation (forced sell, price moves down):
-    Buyers absorb the forced sells → positive delta reduces pressure.
-    total_pressure = liq_notional - snapshot_delta
-
-For a SHORT liquidation (forced buy, price moves up):
-    Sellers absorb the forced buys → negative delta reduces pressure.
-    total_pressure = liq_notional + snapshot_delta
-
-Unified:
-    direction = +1 for long, -1 for short
-    total_pressure = liq_notional - direction * snapshot_delta
-
-pressure_remaining
-------------------
-compute_terminal_price now returns pressure_remaining: the portion of
-total_pressure that was NOT consumed by walking the book.  ImpactRecorder
-uses this as the new liq_remaining on each tick — actual L2-based
-depletion rather than an arbitrary exponential decay.
 """
 from __future__ import annotations
 
@@ -278,62 +263,67 @@ class L2Model:
     def compute_terminal_price(
         self,
         liq_notional: float,
-        snapshot_delta: float,
         side: str,
         sym: str | None = None,
     ) -> dict:
-        """Walk the composite book until effective pressure is consumed.
+        """Walk the composite book until liq_notional is consumed.
+
+        READ-ONLY — this function changes no state and must never be
+        used to update liq_remaining in the caller. It is purely a
+        forward price estimate given the current tank size.
+
+        Delta is NOT a parameter here. It is the caller's responsibility
+        to update liq_notional with delta before calling this function.
+        See ImpactRecorder._tick_all for the correct usage pattern.
 
         Parameters
         ----------
-        liq_notional   : float — current remaining liquidation notional (USD)
-        snapshot_delta : float — current-second net flow
-                                 (positive = buying, negative = selling)
-        side           : str   — "long" (forced sell) or "short" (forced buy)
-        sym            : str   — canonical symbol key e.g. "BTC"
+        liq_notional : float — current remaining liquidation notional (USD).
+                               This is liq_remaining AFTER delta has already
+                               been applied by the caller.
+        side         : str   — "long" (forced sell) or "short" (forced buy)
+        sym          : str   — canonical symbol key e.g. "BTC"
 
         Returns
         -------
         dict with keys:
-            terminal_price    float  — estimated absorption price
-            levels_consumed   int
-            absorbed          bool   — counter-flow exceeds liq_notional
-            beyond_cutoff     bool
-            cutoff_price      float | None
-            pressure_remaining float — total_pressure not consumed by the book.
-                                       ImpactRecorder uses this as the updated
-                                       liq_remaining on each tick, giving real
-                                       L2-based depletion instead of an
-                                       arbitrary exponential decay.
+            terminal_price  float        — estimated absorption price
+            levels_consumed int
+            absorbed        bool         — liq_notional was zero or negative
+            beyond_cutoff   bool
+            cutoff_price    float | None
         """
         if sym is None:
             sym = self._s.symbol
 
         mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
-        _empty = {"terminal_price": mid, "levels_consumed": 0, "absorbed": False,
-                  "beyond_cutoff": False, "cutoff_price": None, "pressure_remaining": 0.0}
+        _empty = {
+            "terminal_price":  mid,
+            "levels_consumed": 0,
+            "absorbed":        False,
+            "beyond_cutoff":   False,
+            "cutoff_price":    None,
+        }
 
         if mid == 0:
             return _empty
 
-        direction      = 1.0 if side == "long" else -1.0
-        total_pressure = liq_notional - direction * snapshot_delta
-
-        if total_pressure <= 0:
+        # Tank is empty — forced flow already absorbed
+        if liq_notional <= 0:
             return {**_empty, "absorbed": True}
 
         book_entry = self._books.get(sym)
         if book_entry is None:
-            return {**_empty, "pressure_remaining": total_pressure}
+            return _empty
 
         book   = book_entry.bids   if side == "long" else book_entry.asks
         cutoff = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
 
         if not book:
-            return {**_empty, "pressure_remaining": total_pressure, "cutoff_price": cutoff}
+            return {**_empty, "cutoff_price": cutoff}
 
-        remaining     = total_pressure
+        remaining     = liq_notional
         terminal      = mid
         consumed      = 0
         beyond_cutoff = False
@@ -354,9 +344,9 @@ class L2Model:
             terminal   = price
             consumed  += 1
         else:
-            # Exhausted the book — extrapolate
+            # Exhausted the entire book — extrapolate beyond deepest level
             extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
-            extra_pct  = (remaining / total_pressure) * extrap_pct
+            extra_pct  = (remaining / liq_notional) * extrap_pct
             if side == "long":
                 terminal *= (1 - extra_pct / 100)
             else:
@@ -365,10 +355,9 @@ class L2Model:
                 beyond_cutoff = True
 
         return {
-            "terminal_price":    round(terminal, 6),
-            "levels_consumed":   consumed,
-            "absorbed":          False,   # absorption checked in impact.py against initial vol
-            "beyond_cutoff":     beyond_cutoff,
-            "cutoff_price":      round(cutoff, 6) if cutoff is not None else None,
-            "pressure_remaining": max(0.0, remaining),
+            "terminal_price":  round(terminal, 6),
+            "levels_consumed": consumed,
+            "absorbed":        False,
+            "beyond_cutoff":   beyond_cutoff,
+            "cutoff_price":    round(cutoff, 6) if cutoff is not None else None,
         }
