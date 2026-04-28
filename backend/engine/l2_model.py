@@ -15,6 +15,10 @@ Key concepts
 
 * Price buckets — raw levels are rounded to a per-symbol bucket size
   (e.g. $10 for BTC, $0.05 for SOL) and summed.
+  Bid levels use floor (bucket at-or-below actual price — conservative).
+  Ask levels use ceil  (bucket at-or-above actual price — conservative).
+  This ensures ask buckets never collapse below mid, preventing a short
+  liq walk from producing a terminal price below the entry price.
 
 * Exchange coverage — each bucket tracks how many exchanges contributed.
   The data cutoff price is the deepest level where every REST-accessible
@@ -133,10 +137,6 @@ async def _fetch_gate(http: httpx.AsyncClient, sym_name: str
 # Bucketed composite book builder
 # ---------------------------------------------------------------------------
 
-def _bucket_price(price: float, bucket: float) -> float:
-    return math.floor(price / bucket) * bucket
-
-
 def _build_composite(
     exchange_books: list[tuple[str, list[tuple[float,float]], list[tuple[float,float]]]],
     side: str,
@@ -149,7 +149,15 @@ def _build_composite(
     for ex_name, bids, asks in exchange_books:
         levels = bids if side == "long" else asks
         for price, usd_notional in levels:
-            key = _bucket_price(price, bucket)
+            # Bids: floor keeps bucket at-or-below actual bid (conservative downward)
+            # Asks: ceil  keeps bucket at-or-above actual ask (conservative upward)
+            # This prevents ask buckets from collapsing below mid, which would
+            # cause short-liq walks to produce terminal prices below entry.
+            if side == "long":
+                key = math.floor(price / bucket) * bucket
+            else:
+                key = math.ceil(price / bucket) * bucket
+
             if key not in composite:
                 composite[key] = {"usd": 0.0, "exchanges": set()}
             composite[key]["usd"] += usd_notional
