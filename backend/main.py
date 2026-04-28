@@ -14,8 +14,9 @@ Exposes:
 DB changes vs. original (all marked  # DB):
   - import init_db, close_db from db.database
   - lifespan: await init_db() before ConnectionManager.start()
-              await conn_mgr.impact.load_from_db() after start()
               await close_db() after ConnectionManager.stop()
+  - load_from_db() is called once inside ConnectionManager.start(); do
+    NOT call it again here.
 """
 from __future__ import annotations
 
@@ -89,8 +90,7 @@ async def lifespan(app: FastAPI):
 
     from engine.connections import ConnectionManager
     conn_mgr = ConnectionManager(app_state, hub)
-    await conn_mgr.start()
-    await conn_mgr.impact.load_from_db()               # DB: restore history
+    await conn_mgr.start()                             # DB: load_from_db() called inside start()
     log.info("ConnectionManager started")
 
     yield
@@ -122,7 +122,7 @@ async def websocket_endpoint(ws: WebSocket):
     log.info(f"WS client connected ({hub.count} total)")
     # Send immediate snapshot (terminal state)
     await ws.send_text(json.dumps(_build_snapshot()))
-    # FIX: also send impact state immediately so the IMPACT tab is pre-hydrated
+    # Also send impact state immediately so the IMPACT tab is pre-hydrated
     # on connect. Without this the tab is empty until the first impact_update
     # broadcast fires, which only happens when a new observation is recorded.
     if conn_mgr is not None:
@@ -167,17 +167,15 @@ def _build_snapshot() -> dict:
 
 
 def _build_impact_snapshot() -> dict:
-    """Build an impact_update payload from current in-memory observations."""
+    """Build an impact_update payload from current in-memory observations.
+
+    Delegates stats calculation to ImpactRecorder._calc_stats so the same
+    dict-key access logic is used everywhere. The previous implementation
+    used getattr(o, key) on plain dicts, which always returns the default.
+    """
     obs  = conn_mgr.impact.get_all()
     ser  = [conn_mgr.impact.to_serialisable(o) for o in obs]
-    # Reuse the same stats shape the engine normally broadcasts
-    errs = [o.price_error_pct for o in obs if getattr(o, 'price_error_pct', None) is not None]
-    stats = {
-        "total":     len(obs),
-        "recording": sum(1 for o in obs if getattr(o, 'label_filled', 1) == 0),
-        "avg_err":   (sum(errs) / len(errs)) if errs else None,
-        "absorbed":  sum(1 for o in obs if getattr(o, 'absorbed_by_delta', False)),
-    }
+    stats = conn_mgr.impact._calc_stats(obs)
     return {
         "type":         "impact_update",
         "observations": ser,
