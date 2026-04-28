@@ -137,12 +137,16 @@ class AppState:
 
     # Per-symbol current-second net flow (all exchanges combined).
     # Resets every time the wall-clock second advances for that symbol.
-    # This is a true instantaneous snapshot: the sum of all signed trade
-    # notionals that arrived in the current second across all 6 exchanges,
-    # independent of any candle boundary or running accumulator.
-    # ImpactRecorder reads this at the moment a liquidation fires to get
-    # the real-time directional pressure for the L2 model.
+    # Used for display / snapshot purposes. DO NOT use in _tick_all delta
+    # differencing — use sym_impact_delta instead.
     sym_snapshot_delta: dict = field(default_factory=dict)  # sym -> float
+
+    # Per-symbol monotonically accumulating net flow for impact recording.
+    # This counter NEVER resets, so _tick_all can safely difference it at
+    # any interval without hitting a phantom spike at second boundaries.
+    # strategy.py increments this alongside sym_snapshot_delta on every
+    # trade event. impact.py reads only this field.
+    sym_impact_delta: dict = field(default_factory=dict)  # sym -> float
 
     def reset_stats(self):
         self.total_liq         = 0.0
@@ -165,4 +169,4 @@ class AppState:
         self.feed_count        = 0
         self.signal_log        = []
         self.exchanges         = _default_exchanges()
-        # sym_price and sym_snapshot_delta survive symbol switches.
+        # sym_price, sym_snapshot_delta, and sym_impact_delta survive symbol switches.

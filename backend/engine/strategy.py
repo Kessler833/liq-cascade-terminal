@@ -175,16 +175,20 @@ class Strategy:
             return
         s = self._s
 
-        # ---- Per-second snapshot delta (all exchanges, all symbols) ----
+        # ---- Per-second snapshot delta (display / windowed use only) ----
         # Resets each time the wall-clock second advances for this symbol.
-        # This is what ImpactRecorder reads at liquidation time — a true
-        # instantaneous snapshot of buy/sell pressure in this exact second.
+        # DO NOT use this for impact tank differencing — use sym_impact_delta.
         current_second = ts_ms // 1000
         if self._second_ts.get(event_sym) != current_second:
             self._second_ts[event_sym]    = current_second
             self._second_delta[event_sym] = 0.0
         self._second_delta[event_sym] = self._second_delta.get(event_sym, 0.0) + vol_delta
         s.sym_snapshot_delta[event_sym] = self._second_delta[event_sym]
+
+        # ---- Monotonic impact delta (never resets — safe for differencing) ----
+        # ImpactRecorder._tick_all differences this to get per-200ms delta_tick.
+        # Because it never resets, there is no phantom spike at second boundaries.
+        s.sym_impact_delta[event_sym] = s.sym_impact_delta.get(event_sym, 0.0) + vol_delta
 
         # ---- Persist to delta_store at 1m resolution (for chart rebucketing) ----
         bt1m = (ts_ms // 60_000) * 60_000

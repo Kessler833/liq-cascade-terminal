@@ -13,6 +13,10 @@ Two completely separate components:
    Amplifying flow (same direction as forced flow) refills the tank.
    The bucket walk NEVER modifies liq_remaining.
 
+   delta_tick is derived from sym_impact_delta, which is a monotonically
+   accumulating counter that never resets. This prevents phantom tank
+   inflation at second boundaries that would occur with sym_snapshot_delta.
+
    If a new liquidation arrives within the silence window, the tank is
    refilled: liq_remaining += new_usd_val. The tank_empty markers are
    reset so they get re-recorded at the next true depletion.
@@ -128,6 +132,12 @@ def _is_absorbed(side: str, cascade_size: int, initial_liq_volume: float, delta_
          more liquidations, so they were never instantly absorbed.
       2. First delta tick was counter-flow (opposite to the forced direction).
       3. That single tick's counter-flow magnitude >= initial_liq_volume.
+
+    Sign convention (matches _tick_all tank drain):
+      Long liq (direction=+1): positive delta_tick is counter-flow (net buying
+        absorbs forced selling). counter_flow = +1 * positive_delta > 0. ✓
+      Short liq (direction=-1): negative delta_tick is counter-flow (net selling
+        absorbs forced buying). counter_flow = -1 * negative_delta > 0. ✓
     """
     if cascade_size > 1:
         return False
@@ -135,7 +145,8 @@ def _is_absorbed(side: str, cascade_size: int, initial_liq_volume: float, delta_
         return False
     first_delta_tick = delta_series[0][1]
     direction = 1.0 if side == "long" else -1.0
-    counter_flow = -direction * first_delta_tick
+    # No negation: direction * delta_tick is positive when flow opposes forced order.
+    counter_flow = direction * first_delta_tick
     return counter_flow >= initial_liq_volume
 
 
@@ -279,9 +290,9 @@ class ImpactRecorder:
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
-            # Reset _last_delta so the next tick computes delta_tick from the
-            # current baseline, preventing a phantom spike from the stale value.
-            active["_last_delta"]       = self._s.sym_snapshot_delta.get(sym, 0.0)
+            # Reset _last_delta to the current monotonic counter so the next
+            # 200ms tick computes a clean delta_tick from this baseline.
+            active["_last_delta"]       = self._s.sym_impact_delta.get(sym, 0.0)
             active["cascade_events"].append([now, usd_val, exchange])
             # Reset tank-empty markers — tank is alive again
             active["tank_empty_ts"]        = None
@@ -295,7 +306,7 @@ class ImpactRecorder:
             if active:
                 await self._close_obs(sym)
 
-            current_delta = self._s.sym_snapshot_delta.get(sym, 0.0)
+            current_delta = self._s.sym_impact_delta.get(sym, 0.0)
             res = self._l2.compute_terminal_price(usd_val, side, sym=sym)
 
             obs = {
@@ -350,7 +361,10 @@ class ImpactRecorder:
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
             # Step 1: Update the tank with this tick's real market flow.
-            current_delta  = self._s.sym_snapshot_delta.get(sym, 0.0)
+            # sym_impact_delta is a monotonic counter (never resets), so
+            # differencing it always yields a small, correct per-200ms value
+            # with no phantom spikes at second boundaries.
+            current_delta  = self._s.sym_impact_delta.get(sym, 0.0)
             last_delta     = obs.get("_last_delta", current_delta)
             delta_tick     = current_delta - last_delta
             obs["_last_delta"] = current_delta
