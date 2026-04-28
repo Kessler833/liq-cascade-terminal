@@ -14,10 +14,17 @@
  *   Diff          — End - Start: actual signed price move during the cascade
  *   Error %       — (final_expected - initial_expected) / entry_price * 100
  *   Duration      — first liq timestamp → moment liq_remaining hit zero
+ *
+ * Colouring rules:
+ *   Init Δ  — green if the delta is "in favour" of the first liquidation:
+ *             for a LONG liq (forced sell), negative delta (sell pressure) helps
+ *             → green when delta < 0 for long side, green when delta > 0 for short side.
+ *   Final Exp. — red if it does NOT match the End (tank_empty_price) column,
+ *                i.e. the prediction diverged from where price actually landed.
  */
 
 import type { ImpactObs, ImpactStats } from './state';
-import { fmtUSD, fmtPrice, fmtPct, el } from './utils';
+import { fmtUSD, fmtDelta, fmtPrice, fmtPct, el } from './utils';
 import { api } from './api';
 
 declare const Chart: any;
@@ -172,6 +179,37 @@ function filtered(): ImpactObs[] {
   });
 }
 
+/**
+ * Returns true when the initial_delta is "in favour" of the first liquidation.
+ *
+ * A LONG liquidation = a forced sell order hitting the market.
+ * Negative delta (net sell pressure) is HELPING that liquidation push price down.
+ * → green when (side === 'long'  && delta < 0)
+ *
+ * A SHORT liquidation = a forced buy order hitting the market.
+ * Positive delta (net buy pressure) is HELPING that liquidation push price up.
+ * → green when (side === 'short' && delta > 0)
+ */
+function deltaInFavour(side: string, delta: number): boolean {
+  if (side === 'long')  return delta < 0;
+  if (side === 'short') return delta > 0;
+  return false;
+}
+
+/**
+ * Returns true when Final Exp. diverges from End (tank_empty_price).
+ * We flag it red when the prediction materially disagrees with where price
+ * actually ended up — using a 0.5% tolerance to avoid false positives from
+ * rounding.
+ */
+function finalExpMatchesEnd(obs: ImpactObs): boolean {
+  if (obs.final_expected_price == null || obs.tank_empty_price == null) return true;
+  const ref = obs.tank_empty_price;
+  if (ref === 0) return true;
+  const pctDiff = Math.abs(obs.final_expected_price - ref) / ref;
+  return pctDiff < 0.005; // within 0.5% → considered matching
+}
+
 function renderTable(): void {
   const rows       = filtered();
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
@@ -198,7 +236,18 @@ function renderTable(): void {
 
     const isRec     = obs.label_filled === 0;
     const sideColor = obs.side === 'long' ? 'var(--green)' : 'var(--red)';
-    const deltaColor = (obs.initial_delta ?? 0) <= 0 ? 'var(--green)' : 'var(--red)';
+
+    // Init Δ: green if delta is in favour of the first liquidation, red otherwise
+    const delta        = obs.initial_delta ?? 0;
+    const deltaFavour  = deltaInFavour(obs.side, delta);
+    const deltaColor   = deltaFavour ? 'var(--green)' : 'var(--red)';
+
+    // Final Exp.: red if it does not match the End price
+    const finalExpGood  = finalExpMatchesEnd(obs);
+    const finalExpColor = (obs.final_expected_price == null)
+      ? 'var(--text-faint)'
+      : finalExpGood ? 'var(--text-muted)' : 'var(--red)';
+
     const ts        = new Date(obs.timestamp);
     const timeStr   = ts.toLocaleTimeString('en-US', {
       hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -247,9 +296,9 @@ function renderTable(): void {
       <td class="imp-td">${sizeBadge(obs.cascade_size)}</td>
       <td class="imp-td mono">${fmtUSD(obs.initial_liq_volume)}</td>
       <td class="imp-td mono">${fmtUSD(obs.total_liq_volume)}</td>
-      <td class="imp-td mono" style="color:${deltaColor}">${fmtUSD(obs.initial_delta ?? 0)}</td>
+      <td class="imp-td mono" style="color:${deltaColor}">${fmtDelta(delta)}</td>
       <td class="imp-td mono">${fmtPrice(obs.initial_expected_price)}</td>
-      <td class="imp-td mono">${obs.final_expected_price ? fmtPrice(obs.final_expected_price) : '—'}</td>
+      <td class="imp-td mono" style="color:${finalExpColor}">${obs.final_expected_price ? fmtPrice(obs.final_expected_price) : '—'}</td>
       <td class="imp-td mono" style="color:var(--text-muted)">${fmtPrice(obs.entry_price)}</td>
       <td class="imp-td mono" style="color:var(--text-muted)">${obs.tank_empty_price ? fmtPrice(obs.tank_empty_price) : '—'}</td>
       <td class="imp-td mono" style="color:${diffColor}">${diffFmt}</td>

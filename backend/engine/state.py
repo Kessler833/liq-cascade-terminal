@@ -59,68 +59,18 @@ SYMBOL_MAP: dict[str, dict[str, str]] = {
         "gate":    "SOL_USDT",
         "dydx":    "SOL-USD",
     },
-    "XRP": {
-        "binance": "xrpusdt",
-        "bybit":   "XRPUSDT",
-        "okx":     "XRP-USDT-SWAP",
-        "bitget":  "XRPUSDT",
-        "gate":    "XRP_USDT",
-        "dydx":    "XRP-USD",
-    },
-    "DOGE": {
-        "binance": "dogeusdt",
-        "bybit":   "DOGEUSDT",
-        "okx":     "DOGE-USDT-SWAP",
-        "bitget":  "DOGEUSDT",
-        "gate":    "DOGE_USDT",
-        "dydx":    "DOGE-USD",
-    },
-    "AVAX": {
-        "binance": "avaxusdt",
-        "bybit":   "AVAXUSDT",
-        "okx":     "AVAX-USDT-SWAP",
-        "bitget":  "AVAXUSDT",
-        "gate":    "AVAX_USDT",
-        "dydx":    "AVAX-USD",
-    },
-    "LINK": {
-        "binance": "linkusdt",
-        "bybit":   "LINKUSDT",
-        "okx":     "LINK-USDT-SWAP",
-        "bitget":  "LINKUSDT",
-        "gate":    "LINK_USDT",
-        "dydx":    "LINK-USD",
-    },
-    "SUI": {
-        "binance": "suiusdt",
-        "bybit":   "SUIUSDT",
-        "okx":     "SUI-USDT-SWAP",
-        "bitget":  "SUIUSDT",
-        "gate":    "SUI_USDT",
-        "dydx":    "SUI-USD",
-    },
 }
 
 CONTRACT_SIZES: dict[str, dict[str, float]] = {
-    "BTC":  {"okx": 0.01,  "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "ETH":  {"okx": 0.1,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "SOL":  {"okx": 1.0,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "XRP":  {"okx": 100.0, "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "DOGE": {"okx": 10.0,  "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "AVAX": {"okx": 1.0,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "LINK": {"okx": 1.0,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
-    "SUI":  {"okx": 1.0,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
+    "BTC": {"okx": 0.01,  "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
+    "ETH": {"okx": 0.1,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
+    "SOL": {"okx": 1.0,   "dydx": 1.0,  "bybit": 1.0, "binance": 1.0, "bitget": 1.0, "gate": 1.0},
 }
 
 DEFAULT_CASCADE_THRESHOLDS: dict[str, float] = {
     "BTC":  25_000_000,
     "ETH":  10_000_000,
     "SOL":  5_000_000,
-    "XRP":  3_000_000,
-    "DOGE": 2_000_000,
-    "AVAX": 2_000_000,
-    "LINK": 1_500_000,
-    "SUI":  1_500_000,
 }
 
 
