@@ -18,7 +18,6 @@ Public API
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -123,7 +122,7 @@ async def executemany(sql: str, params_list: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration — additive only (ALTER TABLE ADD COLUMN) + one-time backfills
+# Migration — additive only (ALTER TABLE ADD COLUMN)
 # ---------------------------------------------------------------------------
 
 def _migrate_sync(conn: sqlite3.Connection) -> None:
@@ -139,28 +138,6 @@ def _migrate_sync(conn: sqlite3.Connection) -> None:
             added += 1
     for idx_sql in INDEXES:
         conn.execute(idx_sql)
-
-    # One-time backfill: rows recorded before cascade_events tracking was added
-    # have cascade_events_json = NULL.  Synthesise a single start-marker entry
-    # from the row's own timestamp/total_liq_volume/exchange so the frontend
-    # plugin can at least draw one marker at t=0 for those old observations.
-    if "cascade_events_json" in existing or added:
-        rows = conn.execute(
-            "SELECT obs_id, timestamp, total_liq_volume, exchange "
-            "FROM cascade_observations "
-            "WHERE cascade_events_json IS NULL"
-        ).fetchall()
-        if rows:
-            updates = [
-                (json.dumps([[ts, vol or 0.0, ex or "unknown"]]), obs_id)
-                for obs_id, ts, vol, ex in rows
-            ]
-            conn.executemany(
-                "UPDATE cascade_observations SET cascade_events_json = ? WHERE obs_id = ?",
-                updates,
-            )
-            log.info("Migration: backfilled cascade_events_json for %d row(s)", len(rows))
-
     conn.commit()
     if added:
         log.info("Migration: added %d column(s) to cascade_observations", added)
