@@ -13,10 +13,12 @@ Public API
     await execute(sql, params)               -- write, awaits completion
     execute_nonblocking(sql, params) -> bool -- fire-and-forget, drops if queue full
     await executemany(sql, params_list)      -- bulk write
+
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -86,19 +88,19 @@ def _read_sync(sql: str, params: tuple, one: bool) -> Any:
 
 async def fetchall(sql: str, params: tuple = ()) -> list[dict]:
     """Return all matching rows as a list of dicts."""
-    loop = asyncio.get_running_loop()          # FIX: get_running_loop not get_event_loop
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _read_sync, sql, params, False)
 
 
 async def fetchone(sql: str, params: tuple = ()) -> dict | None:
     """Return the first matching row as a dict, or None."""
-    loop = asyncio.get_running_loop()          # FIX: get_running_loop not get_event_loop
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _read_sync, sql, params, True)
 
 
 async def execute(sql: str, params: tuple = ()) -> None:
     """Queue a write and await its completion."""
-    fut = asyncio.get_running_loop().create_future()  # FIX: get_running_loop
+    fut = asyncio.get_running_loop().create_future()
     await _queue.put((sql, params, False, fut))
     await fut
 
@@ -115,13 +117,13 @@ def execute_nonblocking(sql: str, params: tuple = ()) -> bool:
 
 async def executemany(sql: str, params_list: list) -> None:
     """Bulk write; awaits completion."""
-    fut = asyncio.get_running_loop().create_future()  # FIX: get_running_loop
+    fut = asyncio.get_running_loop().create_future()
     await _queue.put((sql, params_list, True, fut))
     await fut
 
 
 # ---------------------------------------------------------------------------
-# Migration — additive only (ALTER TABLE ADD COLUMN)
+# Migration — additive only (ALTER TABLE ADD COLUMN) + one-time backfills
 # ---------------------------------------------------------------------------
 
 def _migrate_sync(conn: sqlite3.Connection) -> None:
@@ -130,7 +132,6 @@ def _migrate_sync(conn: sqlite3.Connection) -> None:
     added    = 0
     for col_name, col_type in CASCADE_OBS_REQUIRED_COLUMNS:
         if col_name not in existing:
-            # SQLite forbids ADD COLUMN ... NOT NULL without a DEFAULT
             safe_type = col_type.replace(" NOT NULL", "")
             conn.execute(
                 f"ALTER TABLE cascade_observations ADD COLUMN {col_name} {safe_type}"
@@ -138,6 +139,28 @@ def _migrate_sync(conn: sqlite3.Connection) -> None:
             added += 1
     for idx_sql in INDEXES:
         conn.execute(idx_sql)
+
+    # One-time backfill: rows recorded before cascade_events tracking was added
+    # have cascade_events_json = NULL.  Synthesise a single start-marker entry
+    # from the row's own timestamp/total_liq_volume/exchange so the frontend
+    # plugin can at least draw one marker at t=0 for those old observations.
+    if "cascade_events_json" in existing or added:
+        rows = conn.execute(
+            "SELECT obs_id, timestamp, total_liq_volume, exchange "
+            "FROM cascade_observations "
+            "WHERE cascade_events_json IS NULL"
+        ).fetchall()
+        if rows:
+            updates = [
+                (json.dumps([[ts, vol or 0.0, ex or "unknown"]]), obs_id)
+                for obs_id, ts, vol, ex in rows
+            ]
+            conn.executemany(
+                "UPDATE cascade_observations SET cascade_events_json = ? WHERE obs_id = ?",
+                updates,
+            )
+            log.info("Migration: backfilled cascade_events_json for %d row(s)", len(rows))
+
     conn.commit()
     if added:
         log.info("Migration: added %d column(s) to cascade_observations", added)
@@ -157,7 +180,7 @@ async def init_db() -> None:
     _conn.execute("PRAGMA busy_timeout=10000")
     _conn.execute("PRAGMA synchronous=NORMAL")
     for ddl in ALL_DDL:
-        _conn.execute(ddl.strip())   # .strip() removes leading/trailing whitespace
+        _conn.execute(ddl.strip())
     _conn.commit()
     _migrate_sync(_conn)
     _queue       = asyncio.Queue(maxsize=5_000)
