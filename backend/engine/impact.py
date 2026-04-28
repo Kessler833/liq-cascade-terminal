@@ -236,6 +236,9 @@ class ImpactRecorder:
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
+            # Reset _last_delta so the next tick computes delta_tick from the
+            # current baseline, preventing a phantom spike from the stale value.
+            active["_last_delta"]       = self._s.sym_snapshot_delta.get(sym, 0.0)
             active["cascade_events"].append([now, usd_val, exchange])
             # Reset tank-empty markers — tank is alive again
             active["tank_empty_ts"]        = None
