@@ -285,12 +285,19 @@ function openDetail(id: string): void {
   document.getElementById('imp-detail')?.classList.add('open');
   fillDetailHeader(obs);
   renderCutoffBanner(obs);
-  const delay = wasOpen ? 0 : PANEL_OPEN_DELAY_MS;
-  setTimeout(() => {
-    if (_selectedId !== id) return;
-    const current = _allObs.find(o => o.id === _selectedId);
+
+  if (wasOpen) {
+    // Panel already visible — render charts synchronously, no slide delay needed
+    const current = _allObs.find(o => o.id === id);
     if (current) renderDetailCharts(current);
-  }, delay);
+  } else {
+    // Panel is sliding open — wait for CSS transition before sizing canvases
+    setTimeout(() => {
+      if (_selectedId !== id) return;
+      const current = _allObs.find(o => o.id === _selectedId);
+      if (current) renderDetailCharts(current);
+    }, PANEL_OPEN_DELAY_MS);
+  }
 }
 
 function closeDetail(): void {
@@ -442,7 +449,7 @@ function renderDetailCharts(obs: ImpactObs): void {
 
   // Chart 1: per-tick delta (flow that updates the tank)
   const deltaSeries = obs.delta_series;
-  if (deltaSeries && deltaSeries.length > 1) {
+  if (deltaSeries && deltaSeries.length >= 1) {
     const labels = elapsedLabels(deltaSeries, origin);
     const data   = deltaSeries.map(([, v]) => v);
     const canvas = getCanvas('imp-chart-delta');
@@ -468,7 +475,7 @@ function renderDetailCharts(obs: ImpactObs): void {
 
   // Chart 2: predicted terminal price over time
   const expSeries = obs.expected_price_series;
-  if (expSeries && expSeries.length > 1) {
+  if (expSeries && expSeries.length >= 1) {
     const labels    = elapsedLabels(expSeries, origin);
     const data      = expSeries.map(([, v]) => v);
     const sideColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)' : 'rgba(0,230,118,0.85)';
@@ -491,9 +498,8 @@ function renderDetailCharts(obs: ImpactObs): void {
   }
 
   // Chart 3: actual price movement
-  // Shows START (entry_price), END (tank_empty_price) and the actual path
   const priceSeries = obs.price_series;
-  if (priceSeries && priceSeries.length > 1) {
+  if (priceSeries && priceSeries.length >= 1) {
     const labels = elapsedLabels(priceSeries, origin);
     const data   = priceSeries.map(([, v]) => v);
     const canvas = getCanvas('imp-chart-price');
@@ -504,13 +510,10 @@ function renderDetailCharts(obs: ImpactObs): void {
           labels,
           datasets: [
             { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-            // START line
             refLine(labels, obs.entry_price, 'rgba(122,132,153,0.6)'),
-            // END line (tank empty price)
             ...(obs.tank_empty_price != null
               ? [refLine(labels, obs.tank_empty_price, 'rgba(255,157,0,0.7)')]
               : []),
-            // Final expected price line
             ...(obs.final_expected_price != null
               ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.5)')]
               : []),
@@ -524,7 +527,7 @@ function renderDetailCharts(obs: ImpactObs): void {
 
   // Chart 4: liq remaining (depleting tank)
   const liqSeries = obs.liq_remaining_series;
-  if (liqSeries && liqSeries.length > 1) {
+  if (liqSeries && liqSeries.length >= 1) {
     const labels    = elapsedLabels(liqSeries, origin);
     const data      = liqSeries.map(([, v]) => v);
     const fillColor = obs.side === 'long' ? 'rgba(255,61,90,0.18)' : 'rgba(0,230,118,0.18)';
