@@ -36,7 +36,9 @@ price_error_pct         — how far off the initial prediction was relative to
                           (initial_expected - final_expected)
                           / (final_expected - entry_price) * 100
                           0% = perfect prediction, 20% = off by one fifth, etc.
-absorbed_by_delta       — tank drained to zero by counter-flow delta
+absorbed_by_delta       — the market instantly ate the liq: counter-flow in
+                          the very first tick alone >= initial_liq_volume.
+                          Slow multi-tick drains are NOT counted as absorbed.
 
 Observation closes only on silence_expired (30s no new liq).
 Tank hitting zero does NOT close — a new cluster may refill it.
@@ -114,6 +116,26 @@ def _price_error(initial_expected: float, final_expected: float, entry_price: fl
     if move == 0.0:
         return None
     return (initial_expected - final_expected) / move * 100
+
+
+def _is_absorbed(side: str, initial_liq_volume: float, delta_series: list) -> bool:
+    """True if counter-flow in the very first tick alone consumed the entire tank.
+
+    Absorption = the market instantly ate the liquidation before it could
+    move price. This requires:
+      1. The first delta tick was counter-flow (opposite to the forced direction).
+      2. That single tick's magnitude >= initial_liq_volume.
+
+    Slow multi-tick drains are NOT absorption — they mean the liq did have
+    an effect and the market gradually worked against it.
+    """
+    if not delta_series:
+        return False
+    first_delta_tick = delta_series[0][1]
+    direction = 1.0 if side == "long" else -1.0
+    # counter_flow = how much the first tick drained the tank
+    counter_flow = -direction * first_delta_tick
+    return counter_flow >= initial_liq_volume
 
 
 def _obs_to_db_row(obs: dict) -> dict:
@@ -354,12 +376,18 @@ class ImpactRecorder:
                 obs["tank_empty_price"]     = sym_price
                 obs["final_expected_price"] = res["terminal_price"]
                 obs["cascade_duration_s"]   = now - obs["timestamp"]
-                obs["absorbed_by_delta"]    = True
                 obs["price_difference"]     = sym_price - obs["entry_price"]
                 obs["price_error_pct"]      = _price_error(
                     obs["initial_expected_price"],
                     res["terminal_price"],
                     obs["entry_price"],
+                )
+                # Absorption: was the first tick alone large enough to eat
+                # the whole tank? Evaluated now that we have the full series.
+                obs["absorbed_by_delta"] = _is_absorbed(
+                    obs["side"],
+                    obs["initial_liq_volume"],
+                    obs["delta_series"],  # series so far (before this tick's append)
                 )
 
             # Record time series
@@ -405,6 +433,8 @@ class ImpactRecorder:
                 obs["final_expected_price"],
                 obs["entry_price"],
             )
+            # Tank never emptied — not absorbed, the liq just expired
+            obs["absorbed_by_delta"] = False
 
         obs.pop("_last_delta", None)
         self.observations.insert(0, obs)
