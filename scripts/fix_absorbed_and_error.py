@@ -1,18 +1,17 @@
 """One-time backfill: recompute absorbed_by_delta and price_error_pct for all DB rows.
 
-Run from the backend/ directory:
-    python ../scripts/fix_absorbed_and_error.py
-
-Or from repo root:
-    python scripts/fix_absorbed_and_error.py --db path/to/cascade.db
+Run from repo root:
+    python3 scripts/fix_absorbed_and_error.py --db ~/.liqterm/liqterm.db
 
 What this fixes
 ---------------
 absorbed_by_delta
     Old logic: True whenever tank hit zero from any delta drain.
-    New logic: True only when the very first tick's counter-flow alone
-               was >= initial_liq_volume (market instantly ate the liq).
-    Rows where tank never hit zero (closed by silence) are forced to False.
+    New logic: True only when ALL of the following:
+      - cascade_size == 1 (refilled cascades are never absorbed)
+      - tank_empty_ts is set (tank actually hit zero)
+      - counter-flow in the very first tick alone >= initial_liq_volume
+    Rows closed by silence (tank never hit zero) are forced to False.
 
 price_error_pct
     Old formula: (final_expected - initial_expected) / entry_price * 100
@@ -25,7 +24,7 @@ import os
 import sqlite3
 import sys
 
-DEFAULT_DB = os.path.join(os.path.dirname(__file__), "..", "backend", "cascade.db")
+DEFAULT_DB = os.path.expanduser("~/.liqterm/liqterm.db")
 
 
 def _jload(val):
@@ -41,8 +40,10 @@ def _price_error(initial_expected, final_expected, entry_price):
     return (initial_expected - final_expected) / move * 100
 
 
-def _is_absorbed(side, initial_liq_volume, delta_series):
-    """Counter-flow in the very first tick alone >= initial_liq_volume."""
+def _is_absorbed(side, cascade_size, initial_liq_volume, delta_series):
+    """Counter-flow in the very first tick alone >= initial_liq_volume, cascade_size == 1."""
+    if cascade_size is None or cascade_size > 1:
+        return False
     if not delta_series or initial_liq_volume is None:
         return False
     first_delta_tick = delta_series[0][1]
@@ -53,7 +54,7 @@ def _is_absorbed(side, initial_liq_volume, delta_series):
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill absorbed_by_delta and price_error_pct")
-    parser.add_argument("--db", default=DEFAULT_DB, help="Path to cascade.db")
+    parser.add_argument("--db", default=DEFAULT_DB, help="Path to liqterm.db")
     parser.add_argument("--dry-run", action="store_true", help="Print changes without writing")
     args = parser.parse_args()
 
@@ -73,21 +74,21 @@ def main():
     stats = {"absorbed_changed": 0, "error_changed": 0, "skipped": 0}
 
     for row in rows:
-        obs_id              = row["obs_id"]
-        side                = row["side"]
-        initial_liq_volume  = row["initial_liq_volume"]
-        initial_expected    = row["initial_expected_price"]
-        final_expected      = row["final_expected_price"]
-        entry_price         = row["entry_price"]
-        tank_empty_ts       = row["tank_empty_ts"]
-        delta_series        = _jload(row["delta_series"])
+        obs_id             = row["obs_id"]
+        side               = row["side"]
+        cascade_size       = row["cascade_size"]
+        initial_liq_volume = row["initial_liq_volume"]
+        initial_expected   = row["initial_expected_price"]
+        final_expected     = row["final_expected_price"]
+        entry_price        = row["entry_price"]
+        tank_empty_ts      = row["tank_empty_ts"]
+        delta_series       = _jload(row["delta_series"])
 
         # --- absorbed_by_delta ---
-        # If tank never emptied (silence closed it), definitely not absorbed.
         if tank_empty_ts is None:
             new_absorbed = 0
         else:
-            new_absorbed = 1 if _is_absorbed(side, initial_liq_volume, delta_series) else 0
+            new_absorbed = 1 if _is_absorbed(side, cascade_size, initial_liq_volume, delta_series) else 0
 
         old_absorbed = row["absorbed_by_delta"] or 0
         if new_absorbed != old_absorbed:
@@ -97,7 +98,6 @@ def main():
         new_error = _price_error(initial_expected, final_expected, entry_price)
         old_error = row["price_error_pct"]
 
-        # Compare loosely — treat None vs None as unchanged
         error_changed = False
         if new_error is None and old_error is not None:
             error_changed = True
