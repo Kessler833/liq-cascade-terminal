@@ -31,7 +31,11 @@ tank_empty_ts           — wall-clock timestamp when liq_remaining → 0
 tank_empty_price        — real market price at that moment (END)
 price_difference        — tank_empty_price - entry_price (actual move)
 cascade_duration_s      — tank_empty_ts - obs.timestamp
-price_error_pct         — (final_expected - initial_expected) / entry_price * 100
+price_error_pct         — how far off the initial prediction was relative to
+                          the actual predicted move size:
+                          (initial_expected - final_expected)
+                          / (final_expected - entry_price) * 100
+                          0% = perfect prediction, 20% = off by one fifth, etc.
 absorbed_by_delta       — tank drained to zero by counter-flow delta
 
 Observation closes only on silence_expired (30s no new liq).
@@ -94,6 +98,22 @@ def _jdump(val) -> str | None:
 
 def _jload(val) -> list:
     return json.loads(val) if val else []
+
+
+def _price_error(initial_expected: float, final_expected: float, entry_price: float) -> float | None:
+    """How far off the initial prediction was, as a fraction of the actual predicted move.
+
+    Formula: (initial_expected - final_expected) / (final_expected - entry_price) * 100
+
+    0%  = model nailed it (initial == final prediction)
+    20% = initial was off by one fifth of the actual move size
+
+    Returns None if the predicted move is zero (flat/no-move prediction).
+    """
+    move = final_expected - entry_price
+    if move == 0.0:
+        return None
+    return (initial_expected - final_expected) / move * 100
 
 
 def _obs_to_db_row(obs: dict) -> dict:
@@ -307,7 +327,6 @@ class ImpactRecorder:
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
             # Step 1: Update the tank with this tick's real market flow.
-            # delta_tick = increment since last tick (not the full second).
             current_delta  = self._s.sym_snapshot_delta.get(sym, 0.0)
             last_delta     = obs.get("_last_delta", current_delta)
             delta_tick     = current_delta - last_delta
@@ -326,7 +345,6 @@ class ImpactRecorder:
             )
 
             # Step 3: Record the exact moment the tank first hits zero.
-            # This is the core output of the whole model.
             if (
                 obs["liq_remaining"] == 0.0
                 and prev_remaining > 0.0
@@ -338,12 +356,11 @@ class ImpactRecorder:
                 obs["cascade_duration_s"]   = now - obs["timestamp"]
                 obs["absorbed_by_delta"]    = True
                 obs["price_difference"]     = sym_price - obs["entry_price"]
-
-                if obs["entry_price"] and obs["initial_expected_price"] is not None:
-                    obs["price_error_pct"] = (
-                        (res["terminal_price"] - obs["initial_expected_price"])
-                        / obs["entry_price"] * 100
-                    )
+                obs["price_error_pct"]      = _price_error(
+                    obs["initial_expected_price"],
+                    res["terminal_price"],
+                    obs["entry_price"],
+                )
 
             # Record time series
             obs["delta_series"].append([now, delta_tick])
@@ -383,11 +400,11 @@ class ImpactRecorder:
                 else obs["initial_expected_price"]
             )
             obs["cascade_duration_s"] = now - obs["timestamp"]
-            if obs["entry_price"] and obs["initial_expected_price"] is not None:
-                obs["price_error_pct"] = (
-                    (obs["final_expected_price"] - obs["initial_expected_price"])
-                    / obs["entry_price"] * 100
-                )
+            obs["price_error_pct"]    = _price_error(
+                obs["initial_expected_price"],
+                obs["final_expected_price"],
+                obs["entry_price"],
+            )
 
         obs.pop("_last_delta", None)
         self.observations.insert(0, obs)
