@@ -208,12 +208,9 @@ function renderTable(): void {
       ? ' <span class="imp-badge amber" title="Terminal estimate crossed book depth cutoff">CUTOFF</span>'
       : '';
 
-    // Diff column: signed, colored green if move was in the expected direction
     const diffFmt  = obs.price_difference != null
       ? (obs.price_difference >= 0 ? '+' : '') + fmtPrice(Math.abs(obs.price_difference))
       : '—';
-    // For a long liq (forced selling), price should drop → negative diff is "expected"
-    // For a short liq (forced buying), price should rise → positive diff is "expected"
     const diffExpected = obs.side === 'long'
       ? (obs.price_difference ?? 0) < 0
       : (obs.price_difference ?? 0) > 0;
@@ -221,12 +218,10 @@ function renderTable(): void {
       ? 'var(--text-faint)'
       : diffExpected ? 'var(--green)' : 'var(--red)';
 
-    // Duration: first liq → tank empty
     const durFmt = obs.cascade_duration_s != null
       ? obs.cascade_duration_s.toFixed(1) + 's'
       : isRec ? 'recording…' : '—';
 
-    // Checkbox cell
     const tdChk = el('td', 'imp-td imp-td-check');
     const chk   = document.createElement('input');
     chk.type      = 'checkbox';
@@ -287,11 +282,9 @@ function openDetail(id: string): void {
   renderCutoffBanner(obs);
 
   if (wasOpen) {
-    // Panel already visible — render charts synchronously, no slide delay needed
     const current = _allObs.find(o => o.id === id);
     if (current) renderDetailCharts(current);
   } else {
-    // Panel is sliding open — wait for CSS transition before sizing canvases
     setTimeout(() => {
       if (_selectedId !== id) return;
       const current = _allObs.find(o => o.id === _selectedId);
@@ -400,25 +393,60 @@ function refLine(labels: string[], value: number, color: string): object {
   };
 }
 
-function cascadeAnnotations(
+/**
+ * Returns a Chart.js plugin that draws vertical orange dashed lines on the
+ * chart canvas for each cascade join event (events[1+]).
+ * This avoids injecting fake datasets which corrupts multi-series charts.
+ */
+function cascadeLinePlugin(
   events: [number, number, string][],
   series: TimeSeries,
   origin: number,
-): object[] {
-  if (events.length <= 1 || !series.length) return [];
+): object {
+  if (events.length <= 1 || !series.length) return {};
+
   const labels = elapsedLabels(series, origin);
-  return events.slice(1).map(([ts, vol]) => {
-    const elapsed  = ((ts - origin) / 1000).toFixed(1) + 's';
-    const idx      = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
-    const tLabel   = idx >= 0 ? labels[idx] : labels[labels.length - 1];
-    const pointData = labels.map(l => l === tLabel ? 0 : null);
-    return {
-      type: 'scatter', label: '+' + fmtUSD(vol), data: pointData,
-      pointRadius: 8, pointStyle: 'line', rotation: 90,
-      borderColor: 'rgba(255,157,0,0.7)', borderWidth: 1.5,
-      fill: false, parsing: false,
-    };
+
+  // For each join event find the nearest label index
+  const joinIndices: number[] = events.slice(1).map(([ts]) => {
+    const elapsed = ((ts - origin) / 1000).toFixed(1) + 's';
+    const idx = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
+    return idx >= 0 ? idx : labels.length - 1;
   });
+
+  return {
+    id: 'cascadeLines',
+    afterDraw(chart: any) {
+      const ctx   = chart.ctx as CanvasRenderingContext2D;
+      const xAxis = chart.scales['x'];
+      const yAxis = chart.scales['y'];
+      if (!xAxis || !yAxis) return;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,157,0,0.55)';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([3, 4]);
+
+      for (let i = 0; i < joinIndices.length; i++) {
+        const idx = joinIndices[i];
+        const x   = xAxis.getPixelForTick(idx);
+        if (x == null || isNaN(x)) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(x, yAxis.top);
+        ctx.lineTo(x, yAxis.bottom);
+        ctx.stroke();
+
+        // Label: "+$vol" above the line
+        const vol = events[i + 1][1];
+        ctx.fillStyle = 'rgba(255,157,0,0.75)';
+        ctx.font = '9px monospace';
+        ctx.fillText('+' + fmtUSD(vol), x + 3, yAxis.top + 10);
+      }
+
+      ctx.restore();
+    },
+  };
 }
 
 function chartOpts(yLabel: string, tickFmt: (v: number) => string): object {
@@ -447,7 +475,7 @@ function renderDetailCharts(obs: ImpactObs): void {
   const origin        = obs.timestamp;
   const cascadeEvents = obs.cascade_events ?? [];
 
-  // Chart 1: per-tick delta (flow that updates the tank)
+  // Chart 1: per-tick delta
   const deltaSeries = obs.delta_series;
   if (deltaSeries && deltaSeries.length >= 1) {
     const labels = elapsedLabels(deltaSeries, origin);
@@ -465,10 +493,10 @@ function renderDetailCharts(obs: ImpactObs): void {
               segment: { borderColor: (c: any) => c.p0.parsed.y <= 0 ? 'rgba(0,230,118,0.8)' : 'rgba(255,61,90,0.8)' },
             },
             refLine(labels, 0, 'rgba(122,132,153,0.3)'),
-            ...cascadeAnnotations(cascadeEvents, deltaSeries, origin),
           ],
         },
         options: chartOpts('Delta tick (USD)', fmtUSD),
+        plugins: [cascadeLinePlugin(cascadeEvents, deltaSeries, origin)],
       });
     }
   }
@@ -489,10 +517,10 @@ function renderDetailCharts(obs: ImpactObs): void {
             { data, borderColor: sideColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
             refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)'),
             ...(obs.tank_empty_price != null ? [refLine(labels, obs.tank_empty_price, 'rgba(0,230,118,0.55)')] : []),
-            ...cascadeAnnotations(cascadeEvents, expSeries, origin),
           ],
         },
         options: chartOpts('Predicted price', fmtPrice),
+        plugins: [cascadeLinePlugin(cascadeEvents, expSeries, origin)],
       });
     }
   }
@@ -517,10 +545,10 @@ function renderDetailCharts(obs: ImpactObs): void {
             ...(obs.final_expected_price != null
               ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.5)')]
               : []),
-            ...cascadeAnnotations(cascadeEvents, priceSeries, origin),
           ],
         },
         options: chartOpts('Price', fmtPrice),
+        plugins: [cascadeLinePlugin(cascadeEvents, priceSeries, origin)],
       });
     }
   }
@@ -541,10 +569,10 @@ function renderDetailCharts(obs: ImpactObs): void {
           datasets: [
             { data, borderColor: lineColor, borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: 'origin', backgroundColor: fillColor },
             refLine(labels, 0, 'rgba(122,132,153,0.35)'),
-            ...cascadeAnnotations(cascadeEvents, liqSeries, origin),
           ],
         },
         options: chartOpts('LIQ remaining (USD)', fmtUSD),
+        plugins: [cascadeLinePlugin(cascadeEvents, liqSeries, origin)],
       });
     }
   }
