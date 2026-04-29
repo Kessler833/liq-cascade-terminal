@@ -21,6 +21,11 @@
  *             → green when delta < 0 for long side, green when delta > 0 for short side.
  *   Final Exp. — red if it does NOT match the End (tank_empty_price) column,
  *                i.e. the prediction diverged from where price actually landed.
+ *
+ * Detail charts (3 panels):
+ *   1. Volume delta over cascade
+ *   2. Predicted vs Actual price (COMBINED) — cyan=actual, dashed=predicted
+ *   3. Liq volume remaining (tank)
  */
 
 import type { ImpactObs, ImpactStats } from './state';
@@ -181,14 +186,6 @@ function filtered(): ImpactObs[] {
 
 /**
  * Returns true when the initial_delta is "in favour" of the first liquidation.
- *
- * A LONG liquidation = a forced sell order hitting the market.
- * Negative delta (net sell pressure) is HELPING that liquidation push price down.
- * → green when (side === 'long'  && delta < 0)
- *
- * A SHORT liquidation = a forced buy order hitting the market.
- * Positive delta (net buy pressure) is HELPING that liquidation push price up.
- * → green when (side === 'short' && delta > 0)
  */
 function deltaInFavour(side: string, delta: number): boolean {
   if (side === 'long')  return delta < 0;
@@ -198,16 +195,13 @@ function deltaInFavour(side: string, delta: number): boolean {
 
 /**
  * Returns true when Final Exp. diverges from End (tank_empty_price).
- * We flag it red when the prediction materially disagrees with where price
- * actually ended up — using a 0.5% tolerance to avoid false positives from
- * rounding.
  */
 function finalExpMatchesEnd(obs: ImpactObs): boolean {
   if (obs.final_expected_price == null || obs.tank_empty_price == null) return true;
   const ref = obs.tank_empty_price;
   if (ref === 0) return true;
   const pctDiff = Math.abs(obs.final_expected_price - ref) / ref;
-  return pctDiff < 0.005; // within 0.5% → considered matching
+  return pctDiff < 0.005;
 }
 
 function renderTable(): void {
@@ -237,12 +231,10 @@ function renderTable(): void {
     const isRec     = obs.label_filled === 0;
     const sideColor = obs.side === 'long' ? 'var(--green)' : 'var(--red)';
 
-    // Init Δ: green if delta is in favour of the first liquidation, red otherwise
     const delta        = obs.initial_delta ?? 0;
     const deltaFavour  = deltaInFavour(obs.side, delta);
     const deltaColor   = deltaFavour ? 'var(--green)' : 'var(--red)';
 
-    // Final Exp.: red if it does not match the End price
     const finalExpGood  = finalExpMatchesEnd(obs);
     const finalExpColor = (obs.final_expected_price == null)
       ? 'var(--text-faint)'
@@ -415,9 +407,9 @@ function renderCutoffBanner(obs: ImpactObs): void {
 function destroyCharts(): void {
   for (const c of Object.values(_charts)) c?.destroy?.();
   _charts = {};
-  for (const id of ['imp-chart-delta','imp-chart-expected','imp-chart-price','imp-chart-tank']) {
+  for (const id of ['imp-chart-delta', 'imp-chart-price-exp', 'imp-chart-tank']) {
     const canvas = document.getElementById(id) as HTMLCanvasElement | null;
-    if (canvas) { const c2d = canvas.getContext('2d'); if (c2d) c2d.clearRect(0,0,canvas.width,canvas.height); }
+    if (canvas) { const c2d = canvas.getContext('2d'); if (c2d) c2d.clearRect(0, 0, canvas.width, canvas.height); }
   }
 }
 
@@ -437,7 +429,7 @@ function elapsedLabels(series: TimeSeries, origin: number): string[] {
 function refLine(labels: string[], value: number, color: string): object {
   return {
     data: labels.map(() => value),
-    borderColor: color, borderWidth: 1, borderDash: [4,4],
+    borderColor: color, borderWidth: 1, borderDash: [4, 4],
     pointRadius: 0, tension: 0, fill: false,
   };
 }
@@ -445,7 +437,6 @@ function refLine(labels: string[], value: number, color: string): object {
 /**
  * Returns a Chart.js plugin that draws vertical orange dashed lines on the
  * chart canvas for each cascade join event (events[1+]).
- * This avoids injecting fake datasets which corrupts multi-series charts.
  */
 function cascadeLinePlugin(
   events: [number, number, string][],
@@ -456,7 +447,6 @@ function cascadeLinePlugin(
 
   const labels = elapsedLabels(series, origin);
 
-  // For each join event find the nearest label index
   const joinIndices: number[] = events.slice(1).map(([ts]) => {
     const elapsed = ((ts - origin) / 1000).toFixed(1) + 's';
     const idx = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
@@ -486,7 +476,6 @@ function cascadeLinePlugin(
         ctx.lineTo(x, yAxis.bottom);
         ctx.stroke();
 
-        // Label: "+$vol" above the line
         const vol = events[i + 1][1];
         ctx.fillStyle = 'rgba(255,157,0,0.75)';
         ctx.font = '9px monospace';
@@ -524,7 +513,7 @@ function renderDetailCharts(obs: ImpactObs): void {
   const origin        = obs.timestamp;
   const cascadeEvents = obs.cascade_events ?? [];
 
-  // Chart 1: per-tick delta
+  // ── Chart 1: per-tick delta ───────────────────────────────────────────────
   const deltaSeries = obs.delta_series;
   if (deltaSeries && deltaSeries.length >= 1) {
     const labels = elapsedLabels(deltaSeries, origin);
@@ -550,59 +539,113 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // Chart 2: predicted terminal price over time
-  const expSeries = obs.expected_price_series;
-  if (expSeries && expSeries.length >= 1) {
-    const labels    = elapsedLabels(expSeries, origin);
-    const data      = expSeries.map(([, v]) => v);
-    const sideColor = obs.side === 'long' ? 'rgba(255,61,90,0.85)' : 'rgba(0,230,118,0.85)';
-    const canvas    = getCanvas('imp-chart-expected');
-    if (canvas) {
-      _charts.expected = new Chart(canvas, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { data, borderColor: sideColor, borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.5)'),
-            ...(obs.tank_empty_price != null ? [refLine(labels, obs.tank_empty_price, 'rgba(0,230,118,0.55)')] : []),
-          ],
-        },
-        options: chartOpts('Predicted price', fmtPrice),
-        plugins: [cascadeLinePlugin(cascadeEvents, expSeries, origin)],
-      });
-    }
-  }
-
-  // Chart 3: actual price movement
+  // ── Chart 2: Predicted vs Actual price — COMBINED ────────────────────────
+  // Actual price (cyan solid) and predicted terminal price (side-colored dashed)
+  // are overlaid on the same axes so the viewer can track how the prediction
+  // converges toward or diverges from the real price over the cascade lifetime.
+  const expSeries   = obs.expected_price_series;
   const priceSeries = obs.price_series;
-  if (priceSeries && priceSeries.length >= 1) {
-    const labels = elapsedLabels(priceSeries, origin);
-    const data   = priceSeries.map(([, v]) => v);
-    const canvas = getCanvas('imp-chart-price');
+
+  if ((expSeries && expSeries.length >= 1) || (priceSeries && priceSeries.length >= 1)) {
+    // Use the longer series for the shared x-axis labels
+    const longerSeries = (expSeries?.length ?? 0) >= (priceSeries?.length ?? 0)
+      ? expSeries! : priceSeries!;
+    const labels    = elapsedLabels(longerSeries, origin);
+    const sideColor = obs.side === 'long' ? 'rgba(255,61,90,0.9)' : 'rgba(0,230,118,0.9)';
+
+    // Align shorter series to the label count — pad tail with null so Chart.js
+    // renders a clean line that simply stops rather than jumping to zero.
+    const priceData: (number | null)[] = labels.map((_, i) =>
+      priceSeries && i < priceSeries.length ? priceSeries[i][1] : null);
+    const expData: (number | null)[] = labels.map((_, i) =>
+      expSeries && i < expSeries.length ? expSeries[i][1] : null);
+
+    const canvas = getCanvas('imp-chart-price-exp');
     if (canvas) {
-      _charts.price = new Chart(canvas, {
+      _charts.priceExp = new Chart(canvas, {
         type: 'line',
         data: {
           labels,
           datasets: [
-            { data, borderColor: 'rgba(0,212,255,0.85)', borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false },
-            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.6)'),
+            // Actual price — thicker cyan, solid
+            {
+              label: 'Actual',
+              data: priceData,
+              borderColor: 'rgba(0,212,255,0.9)',
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.25,
+              fill: false,
+              spanGaps: true,
+            },
+            // Predicted terminal price — side-colored, dashed
+            {
+              label: 'Predicted',
+              data: expData,
+              borderColor: sideColor,
+              borderWidth: 1.5,
+              borderDash: [5, 4],
+              pointRadius: 0,
+              tension: 0.25,
+              fill: false,
+              spanGaps: true,
+            },
+            // Reference: entry price (gray)
+            refLine(labels, obs.entry_price, 'rgba(122,132,153,0.4)'),
+            // Reference: where tank emptied (orange)
             ...(obs.tank_empty_price != null
-              ? [refLine(labels, obs.tank_empty_price, 'rgba(255,157,0,0.7)')]
+              ? [refLine(labels, obs.tank_empty_price, 'rgba(255,157,0,0.55)')]
               : []),
+            // Reference: final predicted price (purple)
             ...(obs.final_expected_price != null
-              ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.5)')]
+              ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.4)')]
               : []),
           ],
         },
-        options: chartOpts('Price', fmtPrice),
-        plugins: [cascadeLinePlugin(cascadeEvents, priceSeries, origin)],
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: {
+              display: true,
+              labels: {
+                color: '#7a8499',
+                font: { size: 9 },
+                boxWidth: 20,
+                padding: 6,
+                // Only show the first two datasets (Actual + Predicted)
+                filter: (item: any) => item.datasetIndex < 2,
+              },
+            },
+            tooltip: {
+              backgroundColor: '#0e1014',
+              borderColor: '#1f2430',
+              borderWidth: 1,
+              titleColor: '#e2e8f0',
+              bodyColor: '#7a8499',
+              callbacks: {
+                label: (item: any) => {
+                  if (item.raw == null) return null;
+                  const names = ['Actual', 'Predicted'];
+                  const name  = names[item.datasetIndex];
+                  return name ? `${name}: ${fmtPrice(item.raw)}` : fmtPrice(item.raw);
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#3d4455', font: { size: 9 }, maxTicksLimit: 6, maxRotation: 0 }, grid: { color: '#1a1e2a' } },
+            y: { ticks: { color: '#3d4455', font: { size: 9 }, callback: fmtPrice }, grid: { color: '#1a1e2a' } },
+          },
+        },
+        plugins: [cascadeLinePlugin(cascadeEvents, longerSeries, origin)],
       });
     }
   }
 
-  // Chart 4: liq remaining (depleting tank)
+  // ── Chart 3: liq remaining (depleting tank) ───────────────────────────────
   const liqSeries = obs.liq_remaining_series;
   if (liqSeries && liqSeries.length >= 1) {
     const labels    = elapsedLabels(liqSeries, origin);

@@ -7,43 +7,23 @@
   <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/src/style.css" />
   <style>
-    /* Price display: white instead of green */
-    #priceDisplay { color: rgba(255, 255, 255, 0.92) !important; }
+    /* Price display: white text (not green) */
+    #priceDisplay { color: var(--text) !important; }
 
-    /* Perf metric chips */
-    .perf-chips {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      padding: 0 6px;
+    /* Perf stat items — same visual language as topbar stat labels */
+    .perf-stats { display: flex; align-items: center; gap: 14px; }
+    .perf-stat  { display: flex; flex-direction: column; gap: 1px; cursor: default; user-select: none; }
+    .perf-stat-label {
+      font-size: 9px; font-weight: 600; color: var(--text-faint);
+      text-transform: uppercase; letter-spacing: 0.09em; line-height: 1;
     }
-    .perf-chip {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 1px;
-      padding: 3px 7px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 5px;
-      cursor: default;
-      user-select: none;
+    .perf-stat-val {
+      font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+      color: var(--text-muted); line-height: 1.3; transition: color 200ms;
     }
-    .perf-chip-label {
-      font-size: 9px;
-      font-weight: 600;
-      color: rgba(255,255,255,0.28);
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-      line-height: 1;
-    }
-    .perf-chip-val {
-      font-size: 11px;
-      font-weight: 600;
-      font-variant-numeric: tabular-nums;
-      color: rgba(255,255,255,0.72);
-      line-height: 1.2;
-    }
+
+    /* Impact detail: 3-column chart grid — wider slot for the combined price chart */
+    #imp-charts-grid { grid-template-columns: 1fr 1.6fr 1fr; }
   </style>
 </head>
 <body>
@@ -64,19 +44,21 @@
   <!-- Connection indicators — populated by initConnDots() -->
   <div class="conn-indicators" id="connDots"></div>
 
-  <!-- Perf metric chips -->
-  <div class="perf-chips">
-    <div class="perf-chip" title="WebSocket round-trip latency (browser &#8596; backend, measured via ping/pong)">
-      <span class="perf-chip-label">WS PING</span>
-      <span class="perf-chip-val" id="perfWsPing">&mdash;</span>
+  <div class="divider"></div>
+
+  <!-- Perf metrics — same visual language as topbar stat labels -->
+  <div class="perf-stats">
+    <div class="perf-stat" title="WebSocket round-trip latency (browser &#8596; backend, measured via ping/pong)">
+      <span class="perf-stat-label">WS PING</span>
+      <span class="perf-stat-val" id="perfWsPing">&mdash;</span>
     </div>
-    <div class="perf-chip" title="Snapshot calculation time: orderbook flush + algo tick (measured server-side)">
-      <span class="perf-chip-label">CALC</span>
-      <span class="perf-chip-val" id="perfCalcUs">&mdash;</span>
+    <div class="perf-stat" title="Snapshot calc time: orderbook flush + algo tick (server-side)">
+      <span class="perf-stat-label">CALC</span>
+      <span class="perf-stat-val" id="perfCalcUs">&mdash;</span>
     </div>
-    <div class="perf-chip" title="Exchange currently providing the price feed">
-      <span class="perf-chip-label">PRICE SRC</span>
-      <span class="perf-chip-val" id="perfPriceSrc">&mdash;</span>
+    <div class="perf-stat" title="Exchange currently providing the price feed">
+      <span class="perf-stat-label">PRICE SRC</span>
+      <span class="perf-stat-val" id="perfPriceSrc">&mdash;</span>
     </div>
   </div>
 
@@ -270,11 +252,20 @@
         </div>
         <button class="imp-close-btn" id="imp-detail-close">&times;</button>
       </div>
+      <!-- 3 charts: delta | predicted vs actual price (combined) | liq tank -->
       <div id="imp-charts-grid">
-        <div class="imp-chart-cell"><div class="imp-chart-label">VOLUME DELTA OVER CASCADE</div><div class="imp-chart-wrap"><canvas id="imp-chart-delta"></canvas></div></div>
-        <div class="imp-chart-cell"><div class="imp-chart-label">PREDICTED TERMINAL PRICE</div><div class="imp-chart-wrap"><canvas id="imp-chart-expected"></canvas></div></div>
-        <div class="imp-chart-cell"><div class="imp-chart-label">ACTUAL PRICE MOVEMENT</div><div class="imp-chart-wrap"><canvas id="imp-chart-price"></canvas></div></div>
-        <div class="imp-chart-cell"><div class="imp-chart-label">LIQ VOLUME REMAINING (TANK)</div><div class="imp-chart-wrap"><canvas id="imp-chart-tank"></canvas></div></div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">VOLUME DELTA OVER CASCADE</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-delta"></canvas></div>
+        </div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">PREDICTED vs ACTUAL PRICE &mdash; <span style="color:var(--accent);font-size:8px">CYAN=ACTUAL</span> &nbsp;<span style="color:var(--text-faint);font-size:8px">DASHED=PREDICTED</span></div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-price-exp"></canvas></div>
+        </div>
+        <div class="imp-chart-cell">
+          <div class="imp-chart-label">LIQ VOLUME REMAINING (TANK)</div>
+          <div class="imp-chart-wrap"><canvas id="imp-chart-tank"></canvas></div>
+        </div>
       </div>
     </div>
   </div>
