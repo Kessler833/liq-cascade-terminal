@@ -307,7 +307,11 @@ class ImpactRecorder:
                 await self._close_obs(sym)
 
             current_delta = self._s.sym_impact_delta.get(sym, 0.0)
-            res = self._l2.compute_terminal_price(usd_val, side, sym=sym)
+            # Pass the liquidation fill price as ref_price so the model starts
+            # its walk from the actual current market price, not the stale
+            # snapshot mid. This also filters out book levels that were already
+            # consumed by the market move that brought price to this point.
+            res = self._l2.compute_terminal_price(usd_val, side, sym=sym, ref_price=price)
 
             obs = {
                 "id":                     _gen_id(),
@@ -377,8 +381,10 @@ class ImpactRecorder:
             )
 
             # Step 2: Read-only bucket walk — purely a prediction.
+            # Pass sym_price as ref_price so the walk starts from the actual
+            # live market price, not the stale REST snapshot mid.
             res = self._l2.compute_terminal_price(
-                obs["liq_remaining"], obs["side"], sym=sym
+                obs["liq_remaining"], obs["side"], sym=sym, ref_price=sym_price
             )
 
             # Step 3: Record the exact moment the tank first hits zero.

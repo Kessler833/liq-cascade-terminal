@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.l2")
 
-REFRESH_S  = 5.0
+REFRESH_S  = 1.0
 BOOK_DEPTH = 50
 
 N_BOOK_EXCHANGES = 5
@@ -273,6 +273,7 @@ class L2Model:
         liq_notional: float,
         side: str,
         sym: str | None = None,
+        ref_price: float | None = None,
     ) -> dict:
         """Walk the composite book until liq_notional is consumed.
 
@@ -291,6 +292,12 @@ class L2Model:
                                been applied by the caller.
         side         : str   — "long" (forced sell) or "short" (forced buy)
         sym          : str   — canonical symbol key e.g. "BTC"
+        ref_price    : float | None — actual current market price to use as
+                               the mid reference. When provided, stale snapshot
+                               mid is ignored and book levels already consumed
+                               by the market move are filtered out.
+                               long liq  → only bids at or below ref_price
+                               short liq → only asks at or above ref_price
 
         Returns
         -------
@@ -304,7 +311,10 @@ class L2Model:
         if sym is None:
             sym = self._s.symbol
 
-        mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
+        mid = (
+            ref_price if ref_price is not None
+            else (self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0)
+        )
 
         _empty = {
             "terminal_price":  mid,
@@ -325,8 +335,21 @@ class L2Model:
         if book_entry is None:
             return _empty
 
-        book   = book_entry.bids   if side == "long" else book_entry.asks
-        cutoff = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
+        book_all = book_entry.bids if side == "long" else book_entry.asks
+        cutoff   = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
+
+        # Discard book levels that have already been consumed by the market move
+        # that brought price to ref_price. Only levels reachable from ref_price
+        # onward are valid for the walk.
+        if ref_price is not None:
+            if side == "long":
+                # Forced sell: only bids at or below the fill price
+                book = [(p, u, n) for p, u, n in book_all if p <= ref_price]
+            else:
+                # Forced buy: only asks at or above the fill price
+                book = [(p, u, n) for p, u, n in book_all if p >= ref_price]
+        else:
+            book = book_all
 
         if not book:
             return {**_empty, "cutoff_price": cutoff}
