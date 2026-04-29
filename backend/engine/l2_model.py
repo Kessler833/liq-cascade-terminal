@@ -7,6 +7,11 @@ Primary path: WebSocket incremental depth streams (pushed by connections.py).
                             Replaces the entire raw book from the WS snapshot.
   apply_depth_diff()     — called on every incremental diff message.
                             Updates only changed levels; marks symbol dirty.
+                            If no snapshot has been received yet for this
+                            exchange, the first diff is treated as an implicit
+                            full snapshot (required for Gate, which sends a
+                            full book as the first update_book message with no
+                            separate snapshot event type).
   flush_dirty()          — called by ImpactRecorder._tick_all() before each
                             bucket walk. Rebuilds composite buckets only for
                             symbols that received diffs since the last flush.
@@ -322,12 +327,23 @@ class L2Model:
         was fully consumed and must be removed. This is O(n_changed_levels),
         typically a handful of entries per message.
 
+        If no snapshot has been received yet for this exchange, the first diff
+        is treated as an implicit full snapshot. This is required for exchanges
+        like Gate (futures.order_book_update) that send a full book as their
+        very first WS message without a separate snapshot event type.
+
         Marks sym as dirty so flush_dirty() rebuilds buckets on the next tick.
         """
         ex_books = self._raw_books.get(sym)
         if ex_books is None or ex_name not in ex_books:
-            # Snapshot not yet received — ignore the diff, WS will resend snapshot.
+            # No snapshot received yet for this exchange on this symbol.
+            # Treat the first diff as an implicit full snapshot rather than
+            # silently dropping it — needed for Gate and any other exchange
+            # that omits a separate snapshot message.
+            log.debug("First diff treated as snapshot: %s/%s", sym, ex_name)
+            self.apply_depth_snapshot(sym, ex_name, bid_diffs, ask_diffs)
             return
+
         book = ex_books[ex_name]
         for p, q in bid_diffs:
             price = float(p)

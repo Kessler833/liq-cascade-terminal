@@ -17,6 +17,15 @@ DB changes vs. original (all marked  # DB):
               await close_db() after ConnectionManager.stop()
   - load_from_db() is called once inside ConnectionManager.start(); do
     NOT call it again here.
+
+Performance broadcast
+---------------------
+_perf_broadcast_loop() fires every 2 s and pushes a {type: "perf"} message
+to all WS clients containing:
+  snapshot_calc_us   — time taken by the last flush_dirty() call (microseconds)
+  exchange_latencies — per-exchange EWMA latency dict (populated externally)
+This is how the frontend receives the book-refresh latency metric that was
+the original goal of the orderbook-slippage fix.
 """
 from __future__ import annotations
 
@@ -81,6 +90,22 @@ hub       = BroadcastHub()
 conn_mgr  = None   # populated in lifespan
 
 
+async def _perf_broadcast_loop():
+    """Broadcast book-flush latency and exchange latencies to the frontend every 2s.
+
+    snapshot_calc_us is written by ImpactRecorder._tick_all() after each
+    flush_dirty() call. exchange_latencies is populated by connections.py
+    when per-exchange EWMA tracking is enabled.
+    """
+    while True:
+        await asyncio.sleep(2.0)
+        await hub.broadcast({
+            "type":               "perf",
+            "snapshot_calc_us":   app_state.snapshot_calc_us,
+            "exchange_latencies": dict(app_state.exchange_latencies),
+        })
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global conn_mgr
@@ -93,8 +118,12 @@ async def lifespan(app: FastAPI):
     await conn_mgr.start()                             # DB: load_from_db() called inside start()
     log.info("ConnectionManager started")
 
+    perf_task = asyncio.create_task(_perf_broadcast_loop(), name="perf_broadcast")
+
     yield
 
+    perf_task.cancel()
+    await asyncio.gather(perf_task, return_exceptions=True)
     await conn_mgr.stop()
     log.info("ConnectionManager stopped")
     await close_db()                                   # DB: flush queue & close
