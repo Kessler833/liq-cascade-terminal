@@ -46,7 +46,10 @@ let _allObs: ImpactObs[] = [];
 let _stats: ImpactStats  = { total: 0, recording: 0, avg_err: null, absorbed: 0 };
 let _charts: Record<string, any> = {};
 const _checkedIds = new Set<string>();
-const _pendingDeleteIds = new Set<string>();
+// Permanent session-level set of deleted IDs.  Never cleared — this prevents
+// a stale WS impact_update broadcast (buffered while the HTTP DELETE was
+// in-flight) from re-inserting entries that the user already deleted.
+const _deletedIds = new Set<string>();
 
 // ---- public API ----
 
@@ -89,11 +92,15 @@ export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
   }
 
   const existingIds = new Set(_allObs.map(o => o.id));
-  const newEntries  = obs.filter(o => !existingIds.has(o.id));
+  // Guard deleted IDs at the source: never treat a deleted entry as a new
+  // arrival, even if a stale WS broadcast carries it after the HTTP DELETE.
+  const newEntries  = obs.filter(o => !existingIds.has(o.id) && !_deletedIds.has(o.id));
   if (newEntries.length) _allObs = [...newEntries, ..._allObs];
 
-  if (_pendingDeleteIds.size) {
-    _allObs = _allObs.filter(o => !_pendingDeleteIds.has(o.id));
+  // Secondary sweep: remove any deleted IDs that may have slipped into
+  // _allObs through an earlier code path (e.g. the in-place update loop).
+  if (_deletedIds.size) {
+    _allObs = _allObs.filter(o => !_deletedIds.has(o.id));
   }
 
   renderStats();
@@ -143,7 +150,10 @@ function syncDeleteBtn(): void {
 async function deleteSelected(): Promise<void> {
   if (_checkedIds.size === 0) return;
   const ids = [..._checkedIds];
-  ids.forEach(id => _pendingDeleteIds.add(id));
+  // Register as permanently deleted before the optimistic UI update and
+  // before the HTTP request — any WS broadcast that arrives at any point
+  // after this will be blocked by the _deletedIds guard in updateImpact().
+  ids.forEach(id => _deletedIds.add(id));
   _allObs = _allObs.filter(o => !_checkedIds.has(o.id));
   if (_selectedId && _checkedIds.has(_selectedId)) closeDetail();
   _checkedIds.clear();
@@ -151,7 +161,6 @@ async function deleteSelected(): Promise<void> {
   renderStats(); renderTable(); syncDeleteBtn();
   try {
     await api.deleteImpact(ids);
-    ids.forEach(id => _pendingDeleteIds.delete(id));
   } catch (err) {
     console.error('[impact] deleteImpact failed:', err);
   }
