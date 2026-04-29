@@ -24,8 +24,16 @@ _perf_broadcast_loop() fires every 2 s and pushes a {type: "perf"} message
 to all WS clients containing:
   snapshot_calc_us   — time taken by the last flush_dirty() call (microseconds)
   exchange_latencies — per-exchange EWMA latency dict (populated externally)
-This is how the frontend receives the book-refresh latency metric that was
-the original goal of the orderbook-slippage fix.
+  price_source       — which exchange last provided a price tick
+This is how the frontend receives the book-refresh latency metric.
+
+Ping/Pong
+---------
+The WS endpoint now parses client messages. When a client sends:
+  {"type": "ping", "ts": <epoch_ms>}
+the server immediately responds with:
+  {"type": "pong", "ts": <same epoch_ms>}
+The frontend measures RTT = Date.now() - msg.ts.
 """
 from __future__ import annotations
 
@@ -91,11 +99,13 @@ conn_mgr  = None   # populated in lifespan
 
 
 async def _perf_broadcast_loop():
-    """Broadcast book-flush latency and exchange latencies to the frontend every 2s.
+    """Broadcast book-flush latency, exchange latencies, and price source to the
+    frontend every 2s.
 
     snapshot_calc_us is written by ImpactRecorder._tick_all() after each
     flush_dirty() call. exchange_latencies is populated by connections.py
     when per-exchange EWMA tracking is enabled.
+    price_source is the last exchange that sent a trade tick for the active symbol.
     """
     while True:
         await asyncio.sleep(2.0)
@@ -103,6 +113,7 @@ async def _perf_broadcast_loop():
             "type":               "perf",
             "snapshot_calc_us":   app_state.snapshot_calc_us,
             "exchange_latencies": dict(app_state.exchange_latencies),
+            "price_source":       app_state.price_source,
         })
 
 
@@ -158,7 +169,15 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.send_text(json.dumps(_build_impact_snapshot()))
     try:
         while True:
-            await ws.receive_text()   # keep-alive; ignore client messages
+            raw = await ws.receive_text()
+            # Handle ping messages — respond with pong so the frontend can
+            # measure round-trip latency.  All other messages are ignored.
+            try:
+                msg = json.loads(raw)
+                if msg.get("type") == "ping":
+                    await ws.send_text(json.dumps({"type": "pong", "ts": msg.get("ts", 0)}))
+            except Exception:
+                pass
     except WebSocketDisconnect:
         pass
     finally:
@@ -169,16 +188,17 @@ async def websocket_endpoint(ws: WebSocket):
 def _build_snapshot() -> dict:
     s = app_state
     return {
-        "type":      "snapshot",
-        "symbol":    s.symbol,
-        "timeframe": s.timeframe,
-        "price":     s.price,
-        "phase":     s.phase,
-        "candles":   s.candles,
-        "liq_bars":  s.liq_bars,
-        "delta_bars":s.delta_bars,
-        "feed":      s.feed[:40],
-        "signal_log":s.signal_log[:30],
+        "type":         "snapshot",
+        "symbol":       s.symbol,
+        "timeframe":    s.timeframe,
+        "price":        s.price,
+        "price_source": s.price_source,
+        "phase":        s.phase,
+        "candles":      s.candles,
+        "liq_bars":     s.liq_bars,
+        "delta_bars":   s.delta_bars,
+        "feed":         s.feed[:40],
+        "signal_log":   s.signal_log[:30],
         "stats": {
             "total_liq":        s.total_liq,
             "total_liq_events": s.total_liq_events,

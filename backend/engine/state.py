@@ -154,6 +154,10 @@ class AppState:
     exchange_latencies: dict  = field(default_factory=dict)   # ex -> float ms
     snapshot_calc_us:   float = 0.0
 
+    # Which exchange last provided a price tick for the active symbol.
+    # Updated by each exchange trade handler; reset to "binance" on symbol switch.
+    price_source: str = "binance"
+
     def reset_stats(self):
         self.total_liq         = 0.0
         self.total_liq_events  = 0
@@ -175,5 +179,6 @@ class AppState:
         self.feed_count        = 0
         self.signal_log        = []
         self.exchanges         = _default_exchanges()
+        self.price_source      = "binance"
         # sym_price, sym_snapshot_delta, sym_impact_delta,
         # exchange_latencies, and snapshot_calc_us survive symbol switches.
