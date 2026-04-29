@@ -65,3 +65,65 @@ export type ServerMsg =
   | { type: 'impact_update';   observations: any[]; stats: any }
   | { type: 'pong';            ts: number }
   | { type: 'perf';            snapshot_calc_us: number; exchange_latencies: Record<string, number>; price_source: string };
+
+// ---------------------------------------------------------------------------
+// Runtime client state — single mutable object shared across all modules.
+// ---------------------------------------------------------------------------
+
+export interface ClientState {
+  symbol: Symbol;
+  timeframe: Timeframe;
+  price: number;
+  phase: Phase;
+  candles: Candle[];
+  liq_bars: LiqBar[];
+  delta_bars: DeltaBar[];
+  feed: FeedItem[];
+  signal_log: LogItem[];
+  stats: Stats;
+  connected_ws: number;
+  conn_status: Record<string, string>;
+  impact_obs: any[];
+}
+
+const _defaultExchanges = (): Record<ExchangeName, { long: number; short: number }> => ({
+  binance: { long: 0, short: 0 },
+  bybit:   { long: 0, short: 0 },
+  okx:     { long: 0, short: 0 },
+  bitget:  { long: 0, short: 0 },
+  gate:    { long: 0, short: 0 },
+  dydx:    { long: 0, short: 0 },
+});
+
+export const state: ClientState = {
+  symbol:       'BTC',
+  timeframe:    '5m',
+  price:        0,
+  phase:        'waiting',
+  candles:      [],
+  liq_bars:     [],
+  delta_bars:   [],
+  feed:         [],
+  signal_log:   [],
+  stats: {
+    total_liq:        0,
+    total_liq_events: 0,
+    longs_liq_usd:    0,
+    shorts_liq_usd:   0,
+    cascade_score:    0,
+    cascade_count:    0,
+    cumulative_delta: 0,
+    liq_1m_bucket:    0,
+    exchanges:        _defaultExchanges(),
+  },
+  connected_ws: 0,
+  conn_status: {
+    binance: 'connecting',
+    bybit:   'connecting',
+    okx:     'connecting',
+    bitget:  'connecting',
+    gate:    'connecting',
+    dydx:    'connecting',
+  },
+  impact_obs: [],
+};
