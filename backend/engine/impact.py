@@ -314,6 +314,12 @@ class ImpactRecorder:
                 await self._close_obs(sym)
 
             current_delta = self._s.sym_impact_delta.get(sym, 0.0)
+            # Flush dirty L2 diffs before the initial prediction so the first
+            # bucket walk sees the same fresh book state as all subsequent ticks.
+            # This also ensures initial_expected_price and the first chart point
+            # are computed from the same book snapshot.
+            if hasattr(self._l2, "flush_dirty"):
+                self._l2.flush_dirty()
             # Pass the liquidation fill price as ref_price so the model starts
             # its walk from the actual current market price, not the stale
             # snapshot mid. This also filters out book levels that were already
@@ -344,9 +350,9 @@ class ImpactRecorder:
                 "absorbed_by_delta":      False,
                 "label_filled":           0,
                 "delta_series":           [],
-                "expected_price_series":  [],
-                "price_series":           [],
-                "liq_remaining_series":   [],
+                "expected_price_series":  [[now, res["terminal_price"]]],
+                "price_series":           [[now, price]],
+                "liq_remaining_series":   [[now, usd_val]],
                 "beyond_cutoff":          res["beyond_cutoff"],
                 "cutoff_price":           res["cutoff_price"],
                 "cascade_events":         [[now, usd_val, exchange]],
@@ -396,10 +402,15 @@ class ImpactRecorder:
 
             direction      = 1.0 if obs["side"] == "long" else -1.0
             prev_remaining = obs["liq_remaining"]
-            obs["liq_remaining"] = max(
-                0.0,
-                obs["liq_remaining"] - direction * delta_tick
-            )
+
+            # Guard: once liq_remaining hits zero the tank is dead.
+            # Ordinary market flow must not re-inflate it — only a real
+            # on_liquidation() call (a genuine new liq event) may do that.
+            if obs["liq_remaining"] > 0:
+                obs["liq_remaining"] = max(
+                    0.0,
+                    obs["liq_remaining"] - direction * delta_tick
+                )
 
             # Step 2: Read-only bucket walk — purely a prediction.
             # Pass sym_price as ref_price so the walk starts from the actual
