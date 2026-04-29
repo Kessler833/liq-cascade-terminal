@@ -24,7 +24,7 @@
  *
  * Detail charts (3 panels):
  *   1. Volume delta over cascade
- *   2. Predicted vs Actual price (COMBINED) — cyan=actual, dashed=predicted
+ *   2. Predicted vs Actual price (COMBINED) — cyan=actual, solid=predicted
  *   3. Liq volume remaining (tank)
  */
 
@@ -540,7 +540,7 @@ function renderDetailCharts(obs: ImpactObs): void {
   }
 
   // ── Chart 2: Predicted vs Actual price — COMBINED ────────────────────────
-  // Actual price (cyan solid) and predicted terminal price (side-colored dashed)
+  // Actual price (cyan solid) and predicted terminal price (side-colored solid)
   // are overlaid on the same axes so the viewer can track how the prediction
   // converges toward or diverges from the real price over the cascade lifetime.
   const expSeries   = obs.expected_price_series;
@@ -578,13 +578,12 @@ function renderDetailCharts(obs: ImpactObs): void {
               fill: false,
               spanGaps: true,
             },
-            // Predicted terminal price — side-colored, dashed
+            // Predicted terminal price — side-colored, solid
             {
               label: 'Predicted',
               data: expData,
               borderColor: sideColor,
-              borderWidth: 1.5,
-              borderDash: [5, 4],
+              borderWidth: 2,
               pointRadius: 0,
               tension: 0.25,
               fill: false,
