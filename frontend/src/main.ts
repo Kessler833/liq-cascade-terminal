@@ -1,7 +1,7 @@
 /**
  * Entry point — wires API, state mutations, and UI/chart updates.
  */
-import { connectWS, onMessage, api } from './api';
+import { connectWS, onMessage, api, getWsRtt } from './api';
 import {
   state, SYMBOLS, TIMEFRAMES,
   type ServerMsg, type Candle,
@@ -11,7 +11,7 @@ import {
   updatePrice, updatePhase, updateStats, updateCascadeMeter,
   updateBarDelta,
   updateConnDot, prependFeedItem, renderFeed, renderLog, prependLogItem,
-  updateCandleLabel, updateStatusBar,
+  updateCandleLabel, updateStatusBar, updatePerfChips,
 } from './ui';
 import {
   initPriceChart, initLiqChart, initDeltaChart,
@@ -138,6 +138,12 @@ function impactTabVisible(): boolean {
   return !document.getElementById('impact-screen')?.classList.contains('hidden');
 }
 
+// ---- RTT refresh — update WS ping chip every 2s from latest measured RTT ----
+setInterval(() => {
+  const rtt = getWsRtt();
+  if (rtt > 0) updatePerfChips({ wsRtt: rtt });
+}, 2000);
+
 // ---- Message handler ----
 onMessage((msg: ServerMsg) => {
   switch (msg.type) {
@@ -157,6 +163,8 @@ onMessage((msg: ServerMsg) => {
       updatePrice(state.price);
       updatePhase(state.phase);
       updateStats(msg.stats);
+      // Show initial price source from snapshot
+      if (msg.price_source) updatePerfChips({ priceSrc: msg.price_source });
       // Show current-candle bar delta from the last delta bar
       const lastDBar = state.delta_bars.at(-1);
       if (lastDBar) updateBarDelta(lastDBar.delta);
@@ -172,7 +180,7 @@ onMessage((msg: ServerMsg) => {
       scrollToLatest();
       renderFeed(state.feed);
       renderLog(state.signal_log);
-      prependLogItem({ msg: `System ready · ${state.symbol} ${state.timeframe} · ${state.candles.length} candles`, type: 'sys', ts: Date.now() });
+      prependLogItem({ msg: `System ready \u00b7 ${state.symbol} ${state.timeframe} \u00b7 ${state.candles.length} candles`, type: 'sys', ts: Date.now() });
       updateCandleLabel(state.symbol, state.timeframe);
       updateStatusBar({
         symbol: state.symbol, timeframe: state.timeframe,
@@ -306,7 +314,7 @@ onMessage((msg: ServerMsg) => {
       updateConnDot(msg.exchange, msg.status);
       if (msg.status === 'error' && !inQuietPeriod()) {
         prependLogItem({
-          msg: `${msg.exchange.toUpperCase()}: error — reconnecting`,
+          msg: `${msg.exchange.toUpperCase()}: error \u2014 reconnecting`,
           type: 'error',
           ts: Date.now(),
         });
@@ -338,7 +346,7 @@ onMessage((msg: ServerMsg) => {
       // Refresh bar delta from last bar after history reload
       const lastBar = state.delta_bars.at(-1);
       if (lastBar) updateBarDelta(lastBar.delta);
-      prependLogItem({ msg: `History loaded: ${state.candles.length} candles · ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
+      prependLogItem({ msg: `History loaded: ${state.candles.length} candles \u00b7 ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
       updateStatusBar({ candles: state.candles.length, lastUpdate: true });
       break;
     }
@@ -362,6 +370,14 @@ onMessage((msg: ServerMsg) => {
       if (impactTabVisible()) {
         updateImpact(msg.observations, msg.stats);
       }
+      break;
+    }
+
+    case 'perf': {
+      updatePerfChips({
+        calcUs:   msg.snapshot_calc_us,
+        priceSrc: msg.price_source,
+      });
       break;
     }
   }

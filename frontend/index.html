@@ -6,6 +6,45 @@
   <title>LIQ CASCADE TERMINAL</title>
   <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/src/style.css" />
+  <style>
+    /* Price display: white instead of green */
+    #priceDisplay { color: rgba(255, 255, 255, 0.92) !important; }
+
+    /* Perf metric chips */
+    .perf-chips {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 6px;
+    }
+    .perf-chip {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+      padding: 3px 7px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px;
+      cursor: default;
+      user-select: none;
+    }
+    .perf-chip-label {
+      font-size: 9px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.28);
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+    .perf-chip-val {
+      font-size: 11px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: rgba(255,255,255,0.72);
+      line-height: 1.2;
+    }
+  </style>
 </head>
 <body>
 
@@ -24,6 +63,22 @@
 
   <!-- Connection indicators — populated by initConnDots() -->
   <div class="conn-indicators" id="connDots"></div>
+
+  <!-- Perf metric chips -->
+  <div class="perf-chips">
+    <div class="perf-chip" title="WebSocket round-trip latency (browser &#8596; backend, measured via ping/pong)">
+      <span class="perf-chip-label">WS PING</span>
+      <span class="perf-chip-val" id="perfWsPing">&mdash;</span>
+    </div>
+    <div class="perf-chip" title="Snapshot calculation time: orderbook flush + algo tick (measured server-side)">
+      <span class="perf-chip-label">CALC</span>
+      <span class="perf-chip-val" id="perfCalcUs">&mdash;</span>
+    </div>
+    <div class="perf-chip" title="Exchange currently providing the price feed">
+      <span class="perf-chip-label">PRICE SRC</span>
+      <span class="perf-chip-val" id="perfPriceSrc">&mdash;</span>
+    </div>
+  </div>
 
   <div class="topbar-right">
     <!-- Screen tabs -->

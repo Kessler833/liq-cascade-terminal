@@ -167,10 +167,52 @@ export function updateConnDot(exchange: string, status: string) {
   if (dot) dot.className = `conn-dot ${status}`;
 }
 
+// ---- Perf metric chips ----
+export function updatePerfChips(opts: {
+  wsRtt?: number;
+  calcUs?: number;
+  priceSrc?: string;
+}): void {
+  if (opts.wsRtt != null) {
+    const el = document.getElementById('perfWsPing');
+    if (el) {
+      el.textContent = opts.wsRtt + 'ms';
+      // Color-code: green <50ms, yellow <150ms, red >=150ms
+      el.style.color = opts.wsRtt < 50
+        ? 'rgba(110,231,183,0.9)'
+        : opts.wsRtt < 150
+          ? 'rgba(252,211,77,0.9)'
+          : 'rgba(248,113,113,0.9)';
+    }
+  }
+  if (opts.calcUs != null) {
+    const el = document.getElementById('perfCalcUs');
+    if (el) {
+      const us = opts.calcUs;
+      el.textContent = us < 1000
+        ? Math.round(us) + 'µs'
+        : (us / 1000).toFixed(1) + 'ms';
+      // Color-code: green <500µs, yellow <2000µs, red >=2000µs
+      el.style.color = us < 500
+        ? 'rgba(110,231,183,0.9)'
+        : us < 2000
+          ? 'rgba(252,211,77,0.9)'
+          : 'rgba(248,113,113,0.9)';
+    }
+  }
+  if (opts.priceSrc != null) {
+    const el = document.getElementById('perfPriceSrc');
+    if (el) {
+      el.textContent = opts.priceSrc.toUpperCase().slice(0, 6);
+      el.style.color = 'rgba(255,255,255,0.88)';
+    }
+  }
+}
+
 // ---- Candle label ----
 export function updateCandleLabel(symbol: string, timeframe: string) {
   const lbl = document.getElementById('candleLabel');
-  if (lbl) lbl.textContent = `${symbol}USDT · ${timeframe} · MULTI-EXCHANGE`;
+  if (lbl) lbl.textContent = `${symbol}USDT \u00b7 ${timeframe} \u00b7 MULTI-EXCHANGE`;
 }
 
 // ---- Status bar ----

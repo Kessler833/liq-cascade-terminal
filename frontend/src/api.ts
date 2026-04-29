@@ -8,6 +8,11 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.ho
 let _ws:        WebSocket | null = null;
 let _handlers:  Handler[]        = [];
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let _rtt = 0;
+let _pingInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Returns the last measured WebSocket round-trip time in milliseconds. */
+export function getWsRtt(): number { return _rtt; }
 
 export function onMessage(fn: Handler) {
   _handlers.push(fn);
@@ -20,16 +25,34 @@ export function connectWS() {
   _ws.onopen = () => {
     console.info('[WS] connected');
     if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    // Start ping interval — measure RTT every 5 seconds
+    if (_pingInterval) clearInterval(_pingInterval);
+    _pingInterval = setInterval(() => {
+      if (_ws && _ws.readyState === WebSocket.OPEN) {
+        _ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+      }
+    }, 5000);
+    // Send an immediate first ping
+    if (_ws.readyState === WebSocket.OPEN) {
+      _ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+    }
   };
 
   _ws.onmessage = (ev) => {
-    let msg: ServerMsg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+    let raw: any;
+    try { raw = JSON.parse(ev.data); } catch { return; }
+    // Handle pong locally — measure RTT, do NOT forward to app handlers
+    if (raw.type === 'pong') {
+      _rtt = Date.now() - (raw.ts ?? 0);
+      return;
+    }
+    const msg = raw as ServerMsg;
     for (const h of _handlers) h(msg);
   };
 
   _ws.onclose = () => {
     console.warn('[WS] closed — reconnecting in 3s');
+    if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     _reconnectTimer = setTimeout(connectWS, 3000);
   };
 
