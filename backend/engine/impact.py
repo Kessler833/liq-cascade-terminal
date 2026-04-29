@@ -5,9 +5,9 @@ Algorithm
 Two completely separate components:
 
 1. Tank (liq_remaining)
-   Updated every 200ms tick using real per-tick market flow:
+   Updated every 50ms tick using real per-tick market flow:
        liq_remaining = max(0, liq_remaining - direction * delta_tick)
-   delta_tick = increment of net buy/sell flow in this 200ms window only.
+   delta_tick = increment of net buy/sell flow in this 50ms window only.
    Long liq: positive delta_tick (net buying) drains the tank.
    Short liq: negative delta_tick (net selling) drains the tank.
    Amplifying flow (same direction as forced flow) refills the tank.
@@ -24,6 +24,10 @@ Two completely separate components:
 2. Bucket walk (read-only prediction)
    Given the current liq_remaining, walks L2 buckets to predict the
    terminal price. Changes no state whatsoever.
+
+   Before each walk, L2Model.flush_dirty() is called to apply any pending
+   WS depth diffs to the composite book. This ensures the walk always sees
+   the freshest possible orderbook state.
 
 Key field definitions
 ---------------------
@@ -67,9 +71,10 @@ import db.database as _db
 
 log = logging.getLogger("liqterm.impact")
 
-SILENCE_WINDOW_S = 30.0
-MIN_LIQ_USD      = 1_000
-TICK_INTERVAL_S  = 0.2
+SILENCE_WINDOW_S    = 30.0
+MIN_LIQ_USD         = 1_000
+TICK_INTERVAL_S     = 0.05   # 50ms — pure compute cadence
+BROADCAST_INTERVAL_S = 0.2   # 200ms — frontend push cadence
 
 _INSERT_SQL = """
 INSERT OR REPLACE INTO cascade_observations (
@@ -291,7 +296,7 @@ class ImpactRecorder:
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
             # Reset _last_delta to the current monotonic counter so the next
-            # 200ms tick computes a clean delta_tick from this baseline.
+            # tick computes a clean delta_tick from this baseline.
             active["_last_delta"]       = self._s.sym_impact_delta.get(sym, 0.0)
             active["cascade_events"].append([now, usd_val, exchange])
             # Reset tank-empty markers — tank is alive again
@@ -350,23 +355,35 @@ class ImpactRecorder:
         await self._broadcast_table_update()
 
     async def _tick_loop(self):
+        """Runs at TICK_INTERVAL_S (50ms) for compute; broadcasts at BROADCAST_INTERVAL_S (200ms)."""
+        last_broadcast = 0.0
         while True:
             await asyncio.sleep(TICK_INTERVAL_S)
             if not self.active:
                 break
             await self._tick_all()
+            now = time.time()
+            if now - last_broadcast >= BROADCAST_INTERVAL_S:
+                await self._broadcast_table_update()
+                last_broadcast = now
         self._tick_task = None
 
     async def _tick_all(self):
         now      = time.time()
         to_close = []
 
+        # Flush any pending WS depth diffs into the composite buckets before
+        # the walk. No-op until Batch 2 adds flush_dirty() to L2Model — the
+        # hasattr guard keeps this safe during the transition.
+        if hasattr(self._l2, "flush_dirty"):
+            self._l2.flush_dirty()
+
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
             # Step 1: Update the tank with this tick's real market flow.
             # sym_impact_delta is a monotonic counter (never resets), so
-            # differencing it always yields a small, correct per-200ms value
+            # differencing it always yields a small, correct per-tick value
             # with no phantom spikes at second boundaries.
             current_delta  = self._s.sym_impact_delta.get(sym, 0.0)
             last_delta     = obs.get("_last_delta", current_delta)
