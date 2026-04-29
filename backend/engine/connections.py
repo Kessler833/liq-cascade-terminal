@@ -9,6 +9,20 @@ and broadcasts to frontend clients via the BroadcastHub.
 Binance kline stream is always @kline_1m. _handle_binance_kline aggregates
 1m candles into the user-selected TF locally, so TF changes never require
 a WebSocket reconnect — only agg state reset + REST history refetch.
+
+Depth streams
+-------------
+Each exchange connection also subscribes to incremental depth updates and
+forwards them to L2Model.apply_depth_snapshot / apply_depth_diff.
+L2Model.flush_dirty() is called by ImpactRecorder._tick_all() at the
+start of each 50ms tick to rebuild composite buckets in one pass.
+
+Exchange depth channels used:
+  Binance  — {sym}@depth@100ms  (100ms batched diffs; snapshot via REST on connect)
+  Bybit    — orderbook.50.{sym} (type=snapshot on connect, type=delta thereafter)
+  OKX      — books50-l2-tbt     (tick-by-trade diffs; action=snapshot or update)
+  Bitget   — books15            (snapshot + incremental)
+  Gate     — futures.order_book_update 100ms 20-level diffs
 """
 from __future__ import annotations
 
@@ -58,11 +72,8 @@ class ConnectionManager:
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
         self._gen: int = 0
-        # Per-symbol last-broadcast TF-bucket open time (key: canonical sym e.g. "BTC").
-        # Using a dict instead of a scalar so on_symbol_change can reset only
-        # the switching symbol without disturbing other symbols' agg state.
         self._last_candle_open_t: dict[str, int] = {}
-        self._agg: dict[str, dict] = {}     # "SYM:tf_bucket" -> live 1m aggregation state
+        self._agg: dict[str, dict] = {}
 
     @property
     def strategy(self) -> "Strategy":
@@ -74,10 +85,6 @@ class ConnectionManager:
 
     async def start(self):
         await self._l2.start()
-        # FIX Bug-6: restore completed observations from SQLite on every startup.
-        # Without this call, self._impact.observations is always empty after a
-        # restart, silently discarding all historical cascade data despite the
-        # DB persistence infrastructure being fully built.
         await self._impact.load_from_db()
         await self._connect_all()
 
@@ -89,7 +96,6 @@ class ConnectionManager:
         await self._http.aclose()
 
     async def reconnect_all(self):
-        """Full reconnect — only used for hard resets (e.g. error recovery)."""
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -101,27 +107,12 @@ class ConnectionManager:
         await self._connect_all()
 
     async def on_symbol_change(self, sym: str):
-        """Symbol changed — no WS reconnect needed.
-
-        Surgically resets only the switching symbol's agg state, then
-        re-fetches REST history. _fetch_binance_history rebuilds candles,
-        liq_bars (via apply_liq_store), and delta_bars (via apply_delta_store)
-        for the new symbol in one round-trip.
-        All 6 exchange connections stay alive; they already subscribe to all
-        symbols and route events via event_sym.
-        """
         self._last_candle_open_t.pop(sym, None)
         for key in [k for k in list(self._agg) if k.startswith(f"{sym}:")]:
             del self._agg[key]
         await self._fetch_binance_history(sym, self._s.timeframe)
 
     async def on_timeframe_change(self, sym: str, tf: str):
-        """TF changed — no WS reconnect needed.
-
-        Reset aggregation state and re-fetch REST history at the new TF.
-        The permanent @kline_1m stream automatically starts filling the
-        new TF buckets on the next 1m close.
-        """
         self._last_candle_open_t.pop(sym, None)
         for key in [k for k in list(self._agg) if k.startswith(f"{sym}:")]:
             del self._agg[key]
@@ -143,9 +134,6 @@ class ConnectionManager:
         await self._hub.broadcast({"type": "conn_status", "exchange": name, "status": status})
 
     async def _on_connected(self, name: str):
-        # FIX: read the previous status BEFORE calling _set_dot, which overwrites
-        # _dot_status[name]. On rapid reconnects this prevents double-counting a
-        # single exchange and pushing connected_ws above the max of 6.
         was_connected = self._dot_status.get(name) == "connected"
         await self._set_dot(name, "connected")
         if not was_connected:
@@ -157,6 +145,28 @@ class ConnectionManager:
             self._s.connected_ws -= 1
         await self._set_dot(name, "error")
         await self._hub.broadcast({"type": "ws_count", "count": self._s.connected_ws})
+
+    # ------------------------------------------------------------------
+    # Binance depth snapshot helper (called once on WS connect)
+    # ------------------------------------------------------------------
+    async def _fetch_binance_depth_snapshot(self, sym: str):
+        """Fetch the Binance REST depth snapshot to seed the WS diff stream.
+        Binance's @depth@100ms stream sends diffs only; a REST snapshot is
+        required as the starting state before diffs can be applied.
+        """
+        from engine.state import SYMBOL_MAP
+        s_name = SYMBOL_MAP[sym]["binance"].upper()
+        url = (f"https://fapi.binance.com/fapi/v1/depth"
+               f"?symbol={s_name}&limit=50")
+        try:
+            r = await self._http.get(url, timeout=4.0)
+            r.raise_for_status()
+            d = r.json()
+            bids = [(float(p), float(q)) for p, q in d.get("bids", [])]
+            asks = [(float(p), float(q)) for p, q in d.get("asks", [])]
+            self._l2.apply_depth_snapshot(sym, "binance", bids, asks)
+        except Exception as e:
+            log.debug("Binance depth snapshot %s: %s", sym, e)
 
     # ------------------------------------------------------------------
     # History fetch
@@ -197,14 +207,13 @@ class ConnectionManager:
             log.warning(f"History fetch failed: {e}")
 
     # ------------------------------------------------------------------
-    # Binance — subscribes to ALL symbols' forceOrder + kline_1m + aggTrade
+    # Binance
     # ------------------------------------------------------------------
     async def _run_binance(self, gen: int):
         from engine.state import SYMBOL_MAP
         await self._set_dot("binance", "connecting")
         self._last_candle_open_t.clear()
         self._agg.clear()
-        # Build O(1) reverse lookup once per connection attempt.
         binance_to_sym = {m["binance"]: s for s, m in SYMBOL_MAP.items()}
         while True:
             if self._gen != gen:
@@ -212,11 +221,19 @@ class ConnectionManager:
             streams = []
             for sym, mapping in SYMBOL_MAP.items():
                 s = mapping["binance"]
-                streams += [f"{s}@forceOrder", f"{s}@kline_1m", f"{s}@aggTrade"]
+                streams += [
+                    f"{s}@forceOrder",
+                    f"{s}@kline_1m",
+                    f"{s}@aggTrade",
+                    f"{s}@depth@100ms",   # incremental depth diffs, 100ms batched
+                ]
             url = "wss://fstream.binance.com/stream?streams=" + "/".join(streams)
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
+                    # Fetch REST depth snapshots for all symbols to seed the diff stream.
+                    for sym in SYMBOL_MAP:
+                        asyncio.create_task(self._fetch_binance_depth_snapshot(sym))
                     asyncio.create_task(
                         self._fetch_binance_history(self._s.symbol, self._s.timeframe, gen)
                     )
@@ -238,6 +255,8 @@ class ConnectionManager:
                             await self._handle_binance_kline(data.get("k", {}), event_sym)
                         elif "aggTrade" in stream:
                             await self._handle_binance_trade(data, event_sym)
+                        elif "depth" in stream:
+                            self._handle_binance_depth(data, event_sym)
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -247,47 +266,31 @@ class ConnectionManager:
             await self._on_disconnected("binance")
             await asyncio.sleep(RECONNECT_DELAY)
 
+    def _handle_binance_depth(self, data: dict, sym: str) -> None:
+        """Handle Binance @depth@100ms incremental diff.
+
+        Payload fields:
+          b: [[price, qty], ...]  bids to update (qty=0 means delete)
+          a: [[price, qty], ...]  asks to update (qty=0 means delete)
+        """
+        bid_diffs = [(float(p), float(q)) for p, q in data.get("b", [])]
+        ask_diffs = [(float(p), float(q)) for p, q in data.get("a", [])]
+        self._l2.apply_depth_diff(sym, "binance", bid_diffs, ask_diffs)
+
     async def _handle_binance_liq(self, o: dict, event_sym: str):
-        # FIX Bug-3: use filled quantity "z" instead of original order quantity "q".
-        #
-        # Binance forceOrder payload fields:
-        #   "q"  = original order quantity (base coin) — what was placed
-        #   "z"  = cumulative filled quantity (base coin) — what actually traded
-        #   "ap" = average fill price (0.0 if nothing has filled yet)
-        #   "p"  = order price
-        #
-        # Using "q" overstated notional for partial fills and produced phantom
-        # notional for unfilled orders ("ap" == 0, "z" == 0).
-        #
-        # Gate: if ap == 0 the liquidation has not filled yet.  The order will
-        # fire again as a separate forceOrder event once it actually fills, so
-        # we skip here to avoid double-counting phantom notional.
         ap = float(o.get("ap") or 0)
         if ap == 0:
-            return  # order not filled yet — wait for the fill event
-        qty = float(o.get("z") or o.get("q") or 0)  # filled qty, fallback to original
+            return
+        qty = float(o.get("z") or o.get("q") or 0)
         usd = qty * ap
         if usd <= 0:
             return
         side  = "short" if o.get("S") == "BUY" else "long"
         price = ap
         await self._strategy.on_liquidation("binance", side, usd, price, o.get("s", ""), event_sym)
-        # FIX: always record impact for every symbol, not just the active one.
-        # impact.on_liquidation now accepts sym= and uses per-symbol price/delta/book.
         await self._impact.on_liquidation("binance", side, usd, price, sym=event_sym)
 
     async def _handle_binance_kline(self, k: dict, event_sym: str):
-        """Receives @kline_1m messages; aggregates into the current user-selected TF.
-
-        Only processes klines for the active symbol — other symbols' price
-        action is captured via their own aggTrade ticks when they become active.
-
-        Aggregation fields per TF bucket (keyed by "SYM:tf_bucket"):
-          o              — open of the first 1m bar in the bucket (never overwritten)
-          h / l / c      — running high / low / close across all 1m bars
-          confirmed_vol  — sum of fully-closed 1m volumes
-          open_1m_vol    — volume of the still-open 1m bar (replaced each tick)
-        """
         if event_sym != self._s.symbol:
             return
 
@@ -335,7 +338,6 @@ class ConnectionManager:
             self._strategy.update_candle(c_tf, True)
             self._s.price = c_tf["c"]
             await self._hub.broadcast({"type": "kline", **c_tf, "closed": True})
-            # Prune agg entries older than one full TF period.
             cutoff = f"{event_sym}:{tf_bucket - tf_ms}"
             for old in [b for b in list(self._agg) if b.startswith(f"{event_sym}:") and b <= cutoff]:
                 del self._agg[old]
@@ -367,7 +369,7 @@ class ConnectionManager:
         await self._strategy.update_price_tick(price, notional, int(d.get("T", 0)), event_sym)
 
     # ------------------------------------------------------------------
-    # Bybit — subscribes to ALL symbols
+    # Bybit
     # ------------------------------------------------------------------
     async def _run_bybit(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -383,7 +385,11 @@ class ConnectionManager:
                     args = []
                     for sym, mapping in SYMBOL_MAP.items():
                         s = mapping["bybit"]
-                        args += [f"allLiquidation.{s}", f"publicTrade.{s}"]
+                        args += [
+                            f"allLiquidation.{s}",
+                            f"publicTrade.{s}",
+                            f"orderbook.50.{s}",   # snapshot on connect, delta thereafter
+                        ]
                     await ws.send(json.dumps({"op": "subscribe", "args": args}))
                     ping_task = asyncio.create_task(self._bybit_ping(ws))
                     try:
@@ -407,7 +413,6 @@ class ConnectionManager:
                                     await self._strategy.on_liquidation(
                                         "bybit", side, usd, price, d.get("s", ""), event_sym
                                     )
-                                    # FIX: unconditional — impact.py now handles any sym.
                                     await self._impact.on_liquidation("bybit", side, usd, price, sym=event_sym)
                             elif topic.startswith("publicTrade"):
                                 for d in items:
@@ -419,16 +424,14 @@ class ConnectionManager:
                                         "bybit", event_sym, float(d.get("v", 0)), price
                                     )
                                     is_buy = d.get("S") == "Buy"
-                                    # FIX: update delta/price for ALL symbols so sym_price
-                                    # and sym_delta are populated when a liq fires on a
-                                    # non-active symbol. strategy.py gates candle/broadcast
-                                    # writes internally.
                                     await self._strategy.update_delta(
                                         notional if is_buy else -notional, int(d.get("T", 0)), event_sym
                                     )
                                     await self._strategy.update_price_tick(
                                         price, notional, int(d.get("T", 0)), event_sym
                                     )
+                            elif topic.startswith("orderbook"):
+                                self._handle_bybit_depth(msg, bybit_to_sym)
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -440,6 +443,33 @@ class ConnectionManager:
             await self._on_disconnected("bybit")
             await asyncio.sleep(RECONNECT_DELAY)
 
+    def _handle_bybit_depth(self, msg: dict, bybit_to_sym: dict) -> None:
+        """Handle Bybit orderbook.50 snapshot and delta messages.
+
+        msg["type"] == "snapshot"  → full book replacement
+        msg["type"] == "delta"     → incremental diffs (delete = qty "0")
+        """
+        topic = msg.get("topic", "")
+        # topic format: "orderbook.50.BTCUSDT"
+        parts = topic.split(".")
+        if len(parts) < 3:
+            return
+        raw_sym = parts[2]
+        sym = bybit_to_sym.get(raw_sym)
+        if sym is None:
+            return
+        data     = msg.get("data", {})
+        msg_type = msg.get("type", "delta")
+        bids_raw = data.get("b", [])
+        asks_raw = data.get("a", [])
+        # Bybit sends [["price", "qty"], ...]; qty "0" means delete
+        bids = [(float(p), float(q)) for p, q in bids_raw]
+        asks = [(float(p), float(q)) for p, q in asks_raw]
+        if msg_type == "snapshot":
+            self._l2.apply_depth_snapshot(sym, "bybit", bids, asks)
+        else:
+            self._l2.apply_depth_diff(sym, "bybit", bids, asks)
+
     async def _bybit_ping(self, ws):
         while True:
             await asyncio.sleep(20)
@@ -449,7 +479,7 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # OKX — subscribes to ALL symbols
+    # OKX
     # ------------------------------------------------------------------
     async def _run_okx(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -466,7 +496,8 @@ class ConnectionManager:
                         {"channel": "liquidation-orders", "instType": "SWAP"},
                     ]
                     for sym, mapping in SYMBOL_MAP.items():
-                        trade_args.append({"channel": "trades", "instId": mapping["okx"]})
+                        trade_args.append({"channel": "trades",         "instId": mapping["okx"]})
+                        trade_args.append({"channel": "books50-l2-tbt", "instId": mapping["okx"]})
                     await ws.send(json.dumps({"op": "subscribe", "args": trade_args}))
                     ping_task = asyncio.create_task(self._okx_ping(ws))
                     try:
@@ -498,15 +529,12 @@ class ConnectionManager:
                                             await self._strategy.on_liquidation(
                                                 "okx", side, usd, bk_px, inst_id, event_sym
                                             )
-                                            # FIX: unconditional — impact.py now handles any sym.
                                             await self._impact.on_liquidation("okx", side, usd, bk_px, sym=event_sym)
                             elif ch == "trades" and data:
                                 inst_id = arg.get("instId", "")
                                 event_sym = okx_to_sym.get(inst_id)
                                 if not event_sym:
                                     continue
-                                # FIX: removed event_sym != self._s.symbol guard.
-                                # update_delta / update_price_tick must run for all symbols.
                                 for d in data:
                                     price    = float(d.get("px", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -519,6 +547,8 @@ class ConnectionManager:
                                     await self._strategy.update_price_tick(
                                         price, notional, int(d.get("ts", 0)), event_sym
                                     )
+                            elif ch == "books50-l2-tbt" and data:
+                                self._handle_okx_depth(msg, okx_to_sym)
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -530,6 +560,32 @@ class ConnectionManager:
             await self._on_disconnected("okx")
             await asyncio.sleep(RECONNECT_DELAY)
 
+    def _handle_okx_depth(self, msg: dict, okx_to_sym: dict) -> None:
+        """Handle OKX books50-l2-tbt snapshot and update messages.
+
+        msg["action"] == "snapshot"  → full book replacement
+        msg["action"] == "update"    → incremental diffs (qty "0" means delete)
+        Each data item has "bids": [[price, qty, ...], ...]
+        """
+        action   = msg.get("action", "update")
+        inst_id  = msg.get("arg", {}).get("instId", "")
+        sym      = okx_to_sym.get(inst_id)
+        if sym is None:
+            return
+        data = msg.get("data", [])
+        if not data:
+            return
+        item     = data[0]
+        bids_raw = item.get("bids", [])
+        asks_raw = item.get("asks", [])
+        # OKX format: [["price", "qty", "", ""], ...]
+        bids = [(float(row[0]), float(row[1])) for row in bids_raw]
+        asks = [(float(row[0]), float(row[1])) for row in asks_raw]
+        if action == "snapshot":
+            self._l2.apply_depth_snapshot(sym, "okx", bids, asks)
+        else:
+            self._l2.apply_depth_diff(sym, "okx", bids, asks)
+
     async def _okx_ping(self, ws):
         while True:
             await asyncio.sleep(25)
@@ -539,7 +595,7 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # Bitget — subscribes to ALL symbols
+    # Bitget
     # ------------------------------------------------------------------
     async def _run_bitget(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -558,6 +614,7 @@ class ConnectionManager:
                         args += [
                             {"instType": "USDT-FUTURES", "channel": "liquidation-order", "instId": s},
                             {"instType": "USDT-FUTURES", "channel": "trade",             "instId": s},
+                            {"instType": "USDT-FUTURES", "channel": "books15",           "instId": s},
                         ]
                     await ws.send(json.dumps({"op": "subscribe", "args": args}))
                     ping_task = asyncio.create_task(self._bitget_ping(ws))
@@ -590,11 +647,8 @@ class ConnectionManager:
                                         await self._strategy.on_liquidation(
                                             "bitget", side, usd, fp, inst_id, event_sym
                                         )
-                                        # FIX: unconditional — impact.py now handles any sym.
                                         await self._impact.on_liquidation("bitget", side, usd, fp, sym=event_sym)
                             elif ch == "trade" and items:
-                                # FIX: removed event_sym != self._s.symbol guard.
-                                # update_delta / update_price_tick must run for all symbols.
                                 for d in items:
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
@@ -607,6 +661,8 @@ class ConnectionManager:
                                     await self._strategy.update_price_tick(
                                         price, notional, int(d.get("ts", 0)), event_sym
                                     )
+                            elif ch == "books15" and items:
+                                self._handle_bitget_depth(msg, event_sym)
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -618,6 +674,27 @@ class ConnectionManager:
             await self._on_disconnected("bitget")
             await asyncio.sleep(RECONNECT_DELAY)
 
+    def _handle_bitget_depth(self, msg: dict, sym: str) -> None:
+        """Handle Bitget books15 snapshot and update messages.
+
+        msg["action"] == "snapshot"  → full book
+        msg["action"] == "update"    → incremental diffs (qty 0 means delete)
+        data[0] has "bids": [[price, qty], ...]
+        """
+        action = msg.get("action", "update")
+        data   = msg.get("data", [])
+        if not data:
+            return
+        item     = data[0]
+        bids_raw = item.get("bids", [])
+        asks_raw = item.get("asks", [])
+        bids = [(float(p), float(q)) for p, q in bids_raw]
+        asks = [(float(p), float(q)) for p, q in asks_raw]
+        if action == "snapshot":
+            self._l2.apply_depth_snapshot(sym, "bitget", bids, asks)
+        else:
+            self._l2.apply_depth_diff(sym, "bitget", bids, asks)
+
     async def _bitget_ping(self, ws):
         while True:
             await asyncio.sleep(25)
@@ -627,7 +704,7 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # Gate — subscribes to ALL symbols
+    # Gate
     # ------------------------------------------------------------------
     async def _run_gate(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -650,6 +727,13 @@ class ConnectionManager:
                         "time": t, "channel": "futures.trades",
                         "event": "subscribe", "payload": all_syms
                     }))
+                    # Subscribe to 100ms incremental depth for all symbols
+                    for contract in all_syms:
+                        await ws.send(json.dumps({
+                            "time": t, "channel": "futures.order_book_update",
+                            "event": "subscribe",
+                            "payload": [contract, "100ms", "20"],
+                        }))
                     ping_task = asyncio.create_task(self._gate_ping(ws))
                     try:
                         async for raw in ws:
@@ -674,7 +758,6 @@ class ConnectionManager:
                                         await self._strategy.on_liquidation(
                                             "gate", side, usd, price, contract, event_sym
                                         )
-                                        # FIX: unconditional — impact.py now handles any sym.
                                         await self._impact.on_liquidation("gate", side, usd, price, sym=event_sym)
                             elif ch == "futures.trades" and items:
                                 for d in items:
@@ -682,8 +765,6 @@ class ConnectionManager:
                                     event_sym = gate_to_sym.get(contract)
                                     if not event_sym:
                                         continue
-                                    # FIX: removed event_sym != self._s.symbol guard.
-                                    # update_delta / update_price_tick must run for all symbols.
                                     price    = float(d.get("price", 0))
                                     notional = self._strategy.get_trade_notional(
                                         "gate", event_sym, abs(float(d.get("size", 0))), price
@@ -696,6 +777,8 @@ class ConnectionManager:
                                     await self._strategy.update_price_tick(
                                         price, notional, ts_ms, event_sym
                                     )
+                            elif ch == "futures.order_book_update" and result:
+                                self._handle_gate_depth(result, gate_to_sym)
                     finally:
                         ping_task.cancel()
             except asyncio.CancelledError:
@@ -707,6 +790,27 @@ class ConnectionManager:
             await self._on_disconnected("gate")
             await asyncio.sleep(RECONNECT_DELAY)
 
+    def _handle_gate_depth(self, result: dict, gate_to_sym: dict) -> None:
+        """Handle Gate futures.order_book_update incremental diffs.
+
+        Gate always sends full levels in each diff (no separate snapshot
+        message type). qty 0 means the level was removed.
+        result fields: contract, bids: [{p, s}, ...], asks: [{p, s}, ...]
+        """
+        contract  = result.get("contract", "")
+        sym       = gate_to_sym.get(contract)
+        if sym is None:
+            return
+        bids_raw  = result.get("bids", [])
+        asks_raw  = result.get("asks", [])
+        bid_diffs = [(float(d["p"]), float(d["s"])) for d in bids_raw]
+        ask_diffs = [(float(d["p"]), float(d["s"])) for d in asks_raw]
+        # Gate sends the first full update as an implicit snapshot.
+        # apply_depth_diff handles missing snapshot gracefully (no-op until
+        # snapshot arrives). For Gate we treat every message as a diff since
+        # there is no explicit snapshot/delta distinction in this channel.
+        self._l2.apply_depth_diff(sym, "gate", bid_diffs, ask_diffs)
+
     async def _gate_ping(self, ws):
         while True:
             await asyncio.sleep(55)
@@ -717,7 +821,7 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # dYdX — subscribes to ALL symbols (trades only; no liquidation feed)
+    # dYdX — trades only; no liquidation feed, no depth stream
     # ------------------------------------------------------------------
     async def _run_dydx(self, gen: int):
         from engine.state import SYMBOL_MAP
@@ -750,9 +854,6 @@ class ConnectionManager:
                         event_sym = dydx_to_sym.get(market_id)
                         if not event_sym:
                             continue
-                        # FIX: removed event_sym != self._s.symbol guard.
-                        # update_delta / update_price_tick must run for all symbols
-                        # so sym_price and sym_delta stay populated for non-active syms.
                         contents = msg.get("contents", {})
                         trades_data = []
                         if msg_type == "subscribed":
