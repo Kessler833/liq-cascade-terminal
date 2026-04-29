@@ -391,6 +391,14 @@ class ImpactRecorder:
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
+            # Fix 1: no live price means the feed is not ready yet (cold start
+            # or a brief WS reconnect gap). Skip this tick entirely rather than
+            # passing 0.0 as ref_price, which would make compute_terminal_price
+            # return terminal_price=0 and corrupt expected_price_series.
+            if not sym_price:
+                log.debug("_tick_all: no price for %s, skipping tick", sym)
+                continue
+
             # Step 1: Update the tank with this tick's real market flow.
             # sym_impact_delta is a monotonic counter (never resets), so
             # differencing it always yields a small, correct per-tick value
@@ -415,8 +423,14 @@ class ImpactRecorder:
             # Step 2: Read-only bucket walk — purely a prediction.
             # Pass sym_price as ref_price so the walk starts from the actual
             # live market price, not the stale REST snapshot mid.
+            # Fix 2: pass None instead of 0.0 when sym_price is falsy so that
+            # compute_terminal_price uses its own internal fallback rather than
+            # treating 0.0 as a valid price (0.0 is not None in Python, so the
+            # existing `if ref_price is not None` guard inside the model would
+            # accept it, set mid=0, and return terminal_price=0).
             res = self._l2.compute_terminal_price(
-                obs["liq_remaining"], obs["side"], sym=sym, ref_price=sym_price
+                obs["liq_remaining"], obs["side"], sym=sym,
+                ref_price=sym_price if sym_price else None
             )
 
             # Step 3: Record the exact moment the tank first hits zero.
