@@ -27,7 +27,9 @@ Two completely separate components:
 
    Before each walk, L2Model.flush_dirty() is called to apply any pending
    WS depth diffs to the composite book. This ensures the walk always sees
-   the freshest possible orderbook state.
+   the freshest possible orderbook state. The duration of flush_dirty() is
+   measured with time.perf_counter() and stored in app_state.snapshot_calc_us
+   for broadcast to the frontend perf display.
 
 Key field definitions
 ---------------------
@@ -373,10 +375,12 @@ class ImpactRecorder:
         to_close = []
 
         # Flush any pending WS depth diffs into the composite buckets before
-        # the walk. No-op until Batch 2 adds flush_dirty() to L2Model — the
-        # hasattr guard keeps this safe during the transition.
+        # the walk. Measure the duration with perf_counter and store it on
+        # app_state so the latency broadcast loop can forward it to the frontend.
         if hasattr(self._l2, "flush_dirty"):
+            _t0 = time.perf_counter()
             self._l2.flush_dirty()
+            self._s.snapshot_calc_us = (time.perf_counter() - _t0) * 1_000_000
 
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
