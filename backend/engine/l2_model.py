@@ -1,16 +1,29 @@
 """Multi-exchange composite L2 impact model.
 
-Fetches order books from 5 exchanges (Binance, Bybit, OKX, Bitget, Gate)
-in parallel, merges them into a single bucketed composite book, then
-estimates the terminal price a liquidation would reach.
+Book maintenance strategy
+-------------------------
+Primary path: WebSocket incremental depth streams (pushed by connections.py).
+  apply_depth_snapshot() — called once per symbol when WS connects.
+                            Replaces the entire raw book from the WS snapshot.
+  apply_depth_diff()     — called on every incremental diff message.
+                            Updates only changed levels; marks symbol dirty.
+  flush_dirty()          — called by ImpactRecorder._tick_all() before each
+                            bucket walk. Rebuilds composite buckets only for
+                            symbols that received diffs since the last flush.
+                            Cost: O(n_levels) per dirty symbol, at most once
+                            per tick (50ms), not once per WS message.
+
+Fallback path: REST polling loop (REFRESH_S = 1.0).
+  Only fires for symbols where _ws_initialized[sym] is False — meaning the
+  WS snapshot has not yet arrived. Once WS is up the REST loop becomes a
+  30-second health-check that is essentially a no-op (skipped per symbol).
 
 Key concepts
 ------------
 * compute_terminal_price is READ-ONLY.
-  It takes liq_notional and walks the book to produce a price estimate.
-  It does NOT take delta as an input. Delta is handled entirely in
-  ImpactRecorder._tick_all before this function is called. The tank
-  (liq_remaining) has already been updated by delta when this runs.
+  It takes liq_notional and walks the composite bucket book to produce a
+  price estimate. It does NOT take delta as an input. Delta is handled
+  entirely in ImpactRecorder._tick_all before this function is called.
   This function changes no state and never feeds back into liq_remaining.
 
 * Price buckets — raw levels are rounded to a per-symbol bucket size
@@ -21,20 +34,20 @@ Key concepts
   liq walk from producing a terminal price below the entry price.
 
 * Exchange coverage — each bucket tracks how many exchanges contributed.
-  The data cutoff price is the deepest level where every REST-accessible
+  The data cutoff price is the deepest level where every WS-tracked
   exchange still contributes.
 
 * beyond_cutoff flag — when the terminal price estimate crosses the
   cutoff, the result carries beyond_cutoff=True and cutoff_price.
 
-* Multi-symbol — books for ALL symbols are refreshed every REFRESH_S
-  seconds in parallel.
+* Multi-symbol — books for ALL symbols are maintained simultaneously.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
+import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -44,7 +57,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.l2")
 
-REFRESH_S  = 1.0
+REFRESH_S  = 1.0   # REST fallback cadence (only fires when WS not yet initialized)
 BOOK_DEPTH = 50
 
 N_BOOK_EXCHANGES = 5
@@ -75,7 +88,7 @@ DEFAULT_EXTRAP_PCT = 2.0
 
 
 # ---------------------------------------------------------------------------
-# Exchange-specific REST book fetchers
+# Exchange-specific REST book fetchers (fallback / cold-start only)
 # ---------------------------------------------------------------------------
 
 async def _fetch_binance(http: httpx.AsyncClient, sym_name: str
@@ -149,10 +162,48 @@ def _build_composite(
     for ex_name, bids, asks in exchange_books:
         levels = bids if side == "long" else asks
         for price, usd_notional in levels:
-            # Bids: floor keeps bucket at-or-below actual bid (conservative downward)
-            # Asks: ceil  keeps bucket at-or-above actual ask (conservative upward)
-            # This prevents ask buckets from collapsing below mid, which would
-            # cause short-liq walks to produce terminal prices below entry.
+            if side == "long":
+                key = math.floor(price / bucket) * bucket
+            else:
+                key = math.ceil(price / bucket) * bucket
+
+            if key not in composite:
+                composite[key] = {"usd": 0.0, "exchanges": set()}
+            composite[key]["usd"] += usd_notional
+            composite[key]["exchanges"].add(ex_name)
+
+    sorted_keys = sorted(composite.keys(), reverse=(side == "long"))
+    sorted_levels = [
+        (k, composite[k]["usd"], len(composite[k]["exchanges"]))
+        for k in sorted_keys
+    ]
+
+    cutoff_price: float | None = None
+    for price, usd, n_ex in sorted_levels:
+        if n_ex >= N_BOOK_EXCHANGES:
+            cutoff_price = price
+
+    return sorted_levels, cutoff_price
+
+
+def _build_composite_from_raw(
+    raw_by_exchange: dict[str, dict[str, dict[float, float]]],
+    side: str,
+    sym: str,
+) -> tuple[list[tuple[float, float, int]], float | None]:
+    """Build composite buckets from the raw WS price->usd dicts.
+
+    raw_by_exchange: { ex_name: { "bids": {price: usd}, "asks": {price: usd} } }
+    Returns the same (sorted_levels, cutoff_price) tuple as _build_composite.
+    """
+    bucket = BUCKET_SIZE.get(sym, DEFAULT_BUCKET)
+    composite: dict[float, dict] = {}
+
+    for ex_name, sides in raw_by_exchange.items():
+        levels = sides.get("bids" if side == "long" else "asks", {})
+        for price, usd_notional in levels.items():
+            if usd_notional <= 0:
+                continue
             if side == "long":
                 key = math.floor(price / bucket) * bucket
             else:
@@ -205,6 +256,19 @@ class L2Model:
         self._http = httpx.AsyncClient(timeout=5.0)
         self._books: dict[str, _SymbolBook] = {}
 
+        # --- WS incremental depth state ---
+        # raw_books[sym][ex_name]["bids"] = { price: usd_notional }
+        # raw_books[sym][ex_name]["asks"] = { price: usd_notional }
+        self._raw_books: dict[str, dict[str, dict[str, dict[float, float]]]] = {}
+
+        # Symbols whose raw books have changed since the last flush.
+        # flush_dirty() rebuilds composite buckets for these and clears the set.
+        self._dirty: set[str] = set()
+
+        # True once the WS snapshot for a symbol has been received.
+        # REST fallback only polls symbols where this is False.
+        self._ws_initialized: dict[str, bool] = {}
+
     async def start(self):
         self._task = asyncio.create_task(self._refresh_loop(), name="l2_refresh")
 
@@ -213,6 +277,104 @@ class L2Model:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
         await self._http.aclose()
+
+    # ------------------------------------------------------------------
+    # WS incremental depth API (called by connections.py)
+    # ------------------------------------------------------------------
+
+    def apply_depth_snapshot(
+        self,
+        sym: str,
+        ex_name: str,
+        bids: list[tuple[float, float]],   # [(price, qty), ...]
+        asks: list[tuple[float, float]],
+    ) -> None:
+        """Replace this exchange's entire book for sym with a fresh WS snapshot.
+
+        Called once per symbol per exchange on WS connect / reconnect.
+        Replaces whatever the REST fallback had stored for this exchange.
+        """
+        ex_books = self._raw_books.setdefault(sym, {})
+        ex_books[ex_name] = {
+            "bids": {float(p): float(q) * float(p) for p, q in bids},
+            "asks": {float(p): float(q) * float(p) for p, q in asks},
+        }
+        self._ws_initialized.setdefault(sym, False)
+        # Mark all exchanges initialized once any snapshot arrives.
+        # Full initialization (all 5 exchanges) is indicated by the raw_books
+        # dict having entries for all exchanges, but a single snapshot is
+        # already far better than the REST fallback for that exchange's levels.
+        self._ws_initialized[sym] = True
+        self._dirty.add(sym)
+        log.debug("WS snapshot applied: %s/%s bids=%d asks=%d",
+                  sym, ex_name, len(bids), len(asks))
+
+    def apply_depth_diff(
+        self,
+        sym: str,
+        ex_name: str,
+        bid_diffs: list[tuple[float, float]],  # [(price, new_qty), ...] qty=0 means delete
+        ask_diffs: list[tuple[float, float]],
+    ) -> None:
+        """Apply an incremental diff for one exchange's book.
+
+        Only changed levels are sent by the exchange. qty=0 means the level
+        was fully consumed and must be removed. This is O(n_changed_levels),
+        typically a handful of entries per message.
+
+        Marks sym as dirty so flush_dirty() rebuilds buckets on the next tick.
+        """
+        ex_books = self._raw_books.get(sym)
+        if ex_books is None or ex_name not in ex_books:
+            # Snapshot not yet received — ignore the diff, WS will resend snapshot.
+            return
+        book = ex_books[ex_name]
+        for p, q in bid_diffs:
+            price = float(p)
+            usd   = float(q) * price
+            if usd <= 0:
+                book["bids"].pop(price, None)
+            else:
+                book["bids"][price] = usd
+        for p, q in ask_diffs:
+            price = float(p)
+            usd   = float(q) * price
+            if usd <= 0:
+                book["asks"].pop(price, None)
+            else:
+                book["asks"][price] = usd
+        self._dirty.add(sym)
+
+    def flush_dirty(self) -> None:
+        """Rebuild composite buckets for all symbols that received diffs since
+        the last flush. Called by ImpactRecorder._tick_all() once per tick,
+        so _rebuild_buckets runs at most 20/s regardless of WS message rate.
+        """
+        for sym in list(self._dirty):
+            self._rebuild_buckets(sym)
+            self._dirty.discard(sym)
+
+    def _rebuild_buckets(self, sym: str) -> None:
+        """Re-bucket the raw WS price->usd dicts into sorted composite format.
+        Writes directly into self._books[sym] so compute_terminal_price always
+        reads the latest state without any additional indirection.
+        """
+        ex_books = self._raw_books.get(sym)
+        if not ex_books:
+            return
+
+        bids, bid_cutoff = _build_composite_from_raw(ex_books, "long",  sym)
+        asks, ask_cutoff = _build_composite_from_raw(ex_books, "short", sym)
+
+        book = self._books.setdefault(sym, _SymbolBook())
+        book.bids       = bids
+        book.asks       = asks
+        book.bid_cutoff = bid_cutoff
+        book.ask_cutoff = ask_cutoff
+
+    # ------------------------------------------------------------------
+    # REST fallback loop (cold-start / WS-not-yet-initialized only)
+    # ------------------------------------------------------------------
 
     async def _refresh_loop(self):
         while True:
@@ -223,6 +385,11 @@ class L2Model:
         from engine.state import SYMBOL_MAP
 
         async def _fetch_one(sym: str):
+            # Skip REST fetch if WS has already provided a snapshot for this sym.
+            # This makes the REST loop a no-op in steady state.
+            if self._ws_initialized.get(sym, False):
+                return
+
             maps = SYMBOL_MAP.get(sym, {})
             mid = self._s.sym_price.get(sym, 0.0) or self._s.price or 0.0
 
@@ -240,7 +407,7 @@ class L2Model:
             exchange_books: list[tuple[str, list, list]] = []
             for (ex_name, _), result in zip(fetchers, results):
                 if isinstance(result, Exception):
-                    log.debug("L2 fetch %s/%s: %s", sym, ex_name, result)
+                    log.debug("L2 REST fetch %s/%s: %s", sym, ex_name, result)
                     continue
                 bids, asks = result
                 exchange_books.append((ex_name, bids, asks))
@@ -258,7 +425,7 @@ class L2Model:
             book.ask_cutoff = ask_cutoff
 
             log.debug(
-                "L2 [%s]: %d bid / %d ask buckets from %d exchanges",
+                "L2 REST [%s]: %d bid / %d ask buckets from %d exchanges",
                 sym, len(bids), len(asks), len(exchange_books),
             )
 
@@ -268,6 +435,9 @@ class L2Model:
         )
 
     # ------------------------------------------------------------------
+    # Price impact walk (read-only)
+    # ------------------------------------------------------------------
+
     def compute_terminal_price(
         self,
         liq_notional: float,
@@ -284,6 +454,9 @@ class L2Model:
         Delta is NOT a parameter here. It is the caller's responsibility
         to update liq_notional with delta before calling this function.
         See ImpactRecorder._tick_all for the correct usage pattern.
+
+        The composite book read here reflects the latest WS depth diffs
+        because ImpactRecorder._tick_all calls flush_dirty() before this.
 
         Parameters
         ----------
@@ -343,10 +516,8 @@ class L2Model:
         # onward are valid for the walk.
         if ref_price is not None:
             if side == "long":
-                # Forced sell: only bids at or below the fill price
                 book = [(p, u, n) for p, u, n in book_all if p <= ref_price]
             else:
-                # Forced buy: only asks at or above the fill price
                 book = [(p, u, n) for p, u, n in book_all if p >= ref_price]
         else:
             book = book_all
