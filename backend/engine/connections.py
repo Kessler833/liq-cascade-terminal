@@ -482,7 +482,7 @@ class ConnectionManager:
     # OKX
     # ------------------------------------------------------------------
     async def _run_okx(self, gen: int):
-        from engine.state import SYMBOL_MAP
+        from engine.state import SYMBOL_MAP, CONTRACT_SIZES
         await self._set_dot("okx", "connecting")
         url = "wss://ws.okx.com:8443/ws/v5/public"
         okx_to_sym = {m["okx"]: s for s, m in SYMBOL_MAP.items()}
@@ -524,7 +524,8 @@ class ConnectionManager:
                                                 "short" if ps == "short" else
                                                 "long"  if det.get("side") == "sell" else "short")
                                         bk_px = float(det.get("bkPx") or det.get("px") or 0)
-                                        usd   = float(det.get("sz", 0)) * bk_px
+                                        contract_size = CONTRACT_SIZES.get(event_sym, {}).get("okx", 1.0)
+                                        usd   = float(det.get("sz", 0)) * contract_size * bk_px
                                         if usd > 0:
                                             await self._strategy.on_liquidation(
                                                 "okx", side, usd, bk_px, inst_id, event_sym
