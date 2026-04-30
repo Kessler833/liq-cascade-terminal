@@ -6,11 +6,12 @@ Two completely separate components:
 
 1. Tank (liq_remaining)
    Updated every 50ms tick using real per-tick market flow:
-       liq_remaining = max(0, liq_remaining - direction * delta_tick)
+       liq_remaining = max(0, liq_remaining - max(0, direction * delta_tick))
    delta_tick = increment of net buy/sell flow in this 50ms window only.
    Long liq: positive delta_tick (net buying) drains the tank.
    Short liq: negative delta_tick (net selling) drains the tank.
-   Amplifying flow (same direction as forced flow) refills the tank.
+   Amplifying flow (same direction as forced flow) has no effect on the tank.
+   Only counter-flow drains it. Only on_liquidation() can refill it.
    The bucket walk NEVER modifies liq_remaining.
 
    delta_tick is derived from sym_impact_delta, which is a monotonically
@@ -414,10 +415,14 @@ class ImpactRecorder:
             # Guard: once liq_remaining hits zero the tank is dead.
             # Ordinary market flow must not re-inflate it — only a real
             # on_liquidation() call (a genuine new liq event) may do that.
+            # Drain is one-directional: only counter-flow (direction * delta_tick > 0)
+            # reduces liq_remaining. Amplifying flow (direction * delta_tick < 0)
+            # is clamped to 0 — it has no effect.
+            # Tank can only grow via on_liquidation() adding real usd_val.
             if obs["liq_remaining"] > 0:
                 obs["liq_remaining"] = max(
                     0.0,
-                    obs["liq_remaining"] - direction * delta_tick
+                    obs["liq_remaining"] - max(0.0, direction * delta_tick)
                 )
 
             # Step 2: Read-only bucket walk — purely a prediction.

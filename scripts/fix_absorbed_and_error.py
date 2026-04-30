@@ -48,7 +48,7 @@ def _is_absorbed(side, cascade_size, initial_liq_volume, delta_series):
         return False
     first_delta_tick = delta_series[0][1]
     direction = 1.0 if side == "long" else -1.0
-    counter_flow = -direction * first_delta_tick
+    counter_flow = direction * first_delta_tick
     return counter_flow >= initial_liq_volume
 
 
