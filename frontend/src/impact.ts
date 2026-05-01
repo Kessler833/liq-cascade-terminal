@@ -430,7 +430,7 @@ function renderCutoffBanner(obs: ImpactObs): void {
 function destroyCharts(): void {
   for (const c of Object.values(_charts)) c?.destroy?.();
   _charts = {};
-  for (const id of ['imp-chart-delta', 'imp-chart-price-exp', 'imp-chart-tank']) {
+  for (const id of ['imp-chart-delta', 'imp-chart-price-exp', 'imp-chart-tank', 'imp-chart-lambda']) {
     const canvas = document.getElementById(id) as HTMLCanvasElement | null;
     if (canvas) { const c2d = canvas.getContext('2d'); if (c2d) c2d.clearRect(0, 0, canvas.width, canvas.height); }
   }
@@ -626,6 +626,49 @@ function renderDetailCharts(obs: ImpactObs): void {
         },
         options: chartOpts('LIQ remaining (USD)', fmtUSD),
         plugins: [cascadeLinePlugin(cascadeEvents, liqSeries, origin)],
+      });
+    }
+  }
+
+  // ── Chart 4: Kyle's lambda ratio over cascade ─────────────────────────────
+  const lambdaSeries = obs.lambda_series;
+  if (lambdaSeries && lambdaSeries.length >= 1) {
+    const labels = elapsedLabels(lambdaSeries, origin);
+    const data   = lambdaSeries.map(([, v]) => v);
+    const canvas = getCanvas('imp-chart-lambda');
+    if (canvas) {
+      _charts.lambda = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              data,
+              borderColor:     'rgba(255,157,0,0.9)',
+              borderWidth:     1.5,
+              pointRadius:     0,
+              tension:         0.3,
+              fill:            { target: { value: 1.0 }, above: 'rgba(255,157,0,0.08)', below: 'rgba(0,212,255,0.06)' },
+              segment: {
+                borderColor: (c: any) => c.p0.parsed.y > 1.0
+                  ? 'rgba(255,157,0,0.9)'
+                  : 'rgba(0,212,255,0.7)',
+              },
+            },
+            // Baseline at 1.0
+            refLine(labels, 1.0, 'rgba(122,132,153,0.4)'),
+            // Cascade threshold at ~4.0 (approximate visual guide)
+            refLine(labels, 4.0, 'rgba(255,61,90,0.25)'),
+          ],
+        },
+        options: {
+          ...chartOpts('λ ratio', (v: number) => v.toFixed(2) + 'x'),
+          plugins: {
+            ...(chartOpts('λ ratio', (v: number) => v.toFixed(2) + 'x') as any).plugins,
+            annotation: undefined,
+          },
+        },
+        plugins: [cascadeLinePlugin(cascadeEvents, lambdaSeries, origin)],
       });
     }
   }
