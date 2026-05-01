@@ -1,28 +1,12 @@
-"""All 6 exchange WebSocket connectors.
+"""All 6 exchange WebSocket connectors.  Unchanged from v1 except:
 
-Each connector runs as an independent asyncio Task with auto-reconnect.
-All connectors subscribe to ALL symbols permanently — symbol switches
-require only a REST history refetch, never a WS reconnect.
-Normalized events are forwarded to Strategy, which handles state mutation
-and broadcasts to frontend clients via the BroadcastHub.
+1. ConnectionManager.start() initialises one KyleLambda estimator per symbol
+   and stores them on app_state.kyle_lambdas.
 
-Binance kline stream is always @kline_1m. _handle_binance_kline aggregates
-1m candles into the user-selected TF locally, so TF changes never require
-a WebSocket reconnect — only agg state reset + REST history refetch.
-
-Depth streams
--------------
-Each exchange connection also subscribes to incremental depth updates and
-forwards them to L2Model.apply_depth_snapshot / apply_depth_diff.
-L2Model.flush_dirty() is called by ImpactRecorder._tick_all() at the
-start of each 50ms tick to rebuild composite buckets in one pass.
-
-Exchange depth channels used:
-  Binance  — {sym}@depth@100ms  (100ms batched diffs; snapshot via REST on connect)
-  Bybit    — orderbook.50.{sym} (type=snapshot on connect, type=delta thereafter)
-  OKX      — books50-l2-tbt     (tick-by-trade diffs; action=snapshot or update)
-  Bitget   — books15            (snapshot + incremental)
-  Gate     — futures.order_book_update 100ms 20-level diffs
+2. After constructing Strategy and ImpactRecorder, ConnectionManager sets
+   strategy._impact = self._impact so Strategy.update_price_tick() can check
+   whether a cascade is currently active before recording quiet lambda samples.
+   This breaks the circular dependency without changing the public API.
 """
 from __future__ import annotations
 
@@ -56,8 +40,6 @@ def _safe_json(raw: str) -> dict | None:
 
 
 class ConnectionManager:
-    """Owns all exchange connections and coordinates with Strategy + ImpactRecorder."""
-
     def __init__(self, app_state: "AppState", hub):
         from engine.l2_model import L2Model
         from engine.strategy import Strategy
@@ -68,6 +50,11 @@ class ConnectionManager:
         self._l2 = L2Model(app_state)
         self._strategy = Strategy(app_state, self._l2, hub.broadcast)
         self._impact = ImpactRecorder(app_state, self._l2, hub.broadcast)
+
+        # Back-reference so Strategy.update_price_tick() can check whether a
+        # cascade is active before recording quiet lambda samples.
+        self._strategy._impact = self._impact
+
         self._tasks: list[asyncio.Task] = []
         self._dot_status: dict[str, str] = {}
         self._http = httpx.AsyncClient(timeout=10.0)
@@ -84,6 +71,14 @@ class ConnectionManager:
         return self._impact
 
     async def start(self):
+        # ── Initialise one KyleLambda estimator per symbol ───────────────────
+        from engine.state import SYMBOL_MAP
+        from engine.kyle_lambda import KyleLambda
+        for sym in SYMBOL_MAP:
+            if sym not in self._s.kyle_lambdas:
+                self._s.kyle_lambdas[sym] = KyleLambda(sym)
+        log.info("KyleLambda estimators initialised for: %s", list(SYMBOL_MAP.keys()))
+
         await self._l2.start()
         await self._impact.load_from_db()
         await self._connect_all()
@@ -146,14 +141,7 @@ class ConnectionManager:
         await self._set_dot(name, "error")
         await self._hub.broadcast({"type": "ws_count", "count": self._s.connected_ws})
 
-    # ------------------------------------------------------------------
-    # Binance depth snapshot helper (called once on WS connect)
-    # ------------------------------------------------------------------
     async def _fetch_binance_depth_snapshot(self, sym: str):
-        """Fetch the Binance REST depth snapshot to seed the WS diff stream.
-        Binance's @depth@100ms stream sends diffs only; a REST snapshot is
-        required as the starting state before diffs can be applied.
-        """
         from engine.state import SYMBOL_MAP
         s_name = SYMBOL_MAP[sym]["binance"].upper()
         url = (f"https://fapi.binance.com/fapi/v1/depth"
@@ -168,9 +156,6 @@ class ConnectionManager:
         except Exception as e:
             log.debug("Binance depth snapshot %s: %s", sym, e)
 
-    # ------------------------------------------------------------------
-    # History fetch
-    # ------------------------------------------------------------------
     async def _fetch_binance_history(self, sym: str, tf: str, gen: int = -1):
         from engine.state import SYMBOL_MAP, TF_BINANCE
         s_name = SYMBOL_MAP[sym]["binance"].upper()
@@ -225,13 +210,12 @@ class ConnectionManager:
                     f"{s}@forceOrder",
                     f"{s}@kline_1m",
                     f"{s}@aggTrade",
-                    f"{s}@depth@100ms",   # incremental depth diffs, 100ms batched
+                    f"{s}@depth@100ms",
                 ]
             url = "wss://fstream.binance.com/stream?streams=" + "/".join(streams)
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
                     await self._on_connected("binance")
-                    # Fetch REST depth snapshots for all symbols to seed the diff stream.
                     for sym in SYMBOL_MAP:
                         asyncio.create_task(self._fetch_binance_depth_snapshot(sym))
                     asyncio.create_task(
@@ -267,12 +251,6 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     def _handle_binance_depth(self, data: dict, sym: str) -> None:
-        """Handle Binance @depth@100ms incremental diff.
-
-        Payload fields:
-          b: [[price, qty], ...]  bids to update (qty=0 means delete)
-          a: [[price, qty], ...]  asks to update (qty=0 means delete)
-        """
         bid_diffs = [(float(p), float(q)) for p, q in data.get("b", [])]
         ask_diffs = [(float(p), float(q)) for p, q in data.get("a", [])]
         self._l2.apply_depth_diff(sym, "binance", bid_diffs, ask_diffs)
@@ -347,7 +325,6 @@ class ConnectionManager:
                 self._last_candle_open_t[event_sym] = tf_bucket
                 self._strategy.update_candle(c_tf, False)
                 await self._hub.broadcast({"type": "candle_open", **c_tf})
-                log.debug(f"New candle opened: t={tf_bucket} o={c_tf['o']}")
             else:
                 existing = next(
                     (x for x in self._s.candles if x["t"] == tf_bucket), None
@@ -388,7 +365,7 @@ class ConnectionManager:
                         args += [
                             f"allLiquidation.{s}",
                             f"publicTrade.{s}",
-                            f"orderbook.50.{s}",   # snapshot on connect, delta thereafter
+                            f"orderbook.50.{s}",
                         ]
                     await ws.send(json.dumps({"op": "subscribe", "args": args}))
                     ping_task = asyncio.create_task(self._bybit_ping(ws))
@@ -444,13 +421,7 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     def _handle_bybit_depth(self, msg: dict, bybit_to_sym: dict) -> None:
-        """Handle Bybit orderbook.50 snapshot and delta messages.
-
-        msg["type"] == "snapshot"  → full book replacement
-        msg["type"] == "delta"     → incremental diffs (delete = qty "0")
-        """
         topic = msg.get("topic", "")
-        # topic format: "orderbook.50.BTCUSDT"
         parts = topic.split(".")
         if len(parts) < 3:
             return
@@ -460,11 +431,8 @@ class ConnectionManager:
             return
         data     = msg.get("data", {})
         msg_type = msg.get("type", "delta")
-        bids_raw = data.get("b", [])
-        asks_raw = data.get("a", [])
-        # Bybit sends [["price", "qty"], ...]; qty "0" means delete
-        bids = [(float(p), float(q)) for p, q in bids_raw]
-        asks = [(float(p), float(q)) for p, q in asks_raw]
+        bids = [(float(p), float(q)) for p, q in data.get("b", [])]
+        asks = [(float(p), float(q)) for p, q in data.get("a", [])]
         if msg_type == "snapshot":
             self._l2.apply_depth_snapshot(sym, "bybit", bids, asks)
         else:
@@ -562,12 +530,6 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     def _handle_okx_depth(self, msg: dict, okx_to_sym: dict) -> None:
-        """Handle OKX books50-l2-tbt snapshot and update messages.
-
-        msg["action"] == "snapshot"  → full book replacement
-        msg["action"] == "update"    → incremental diffs (qty "0" means delete)
-        Each data item has "bids": [[price, qty, ...], ...]
-        """
         action   = msg.get("action", "update")
         inst_id  = msg.get("arg", {}).get("instId", "")
         sym      = okx_to_sym.get(inst_id)
@@ -577,11 +539,8 @@ class ConnectionManager:
         if not data:
             return
         item     = data[0]
-        bids_raw = item.get("bids", [])
-        asks_raw = item.get("asks", [])
-        # OKX format: [["price", "qty", "", ""], ...]
-        bids = [(float(row[0]), float(row[1])) for row in bids_raw]
-        asks = [(float(row[0]), float(row[1])) for row in asks_raw]
+        bids = [(float(row[0]), float(row[1])) for row in item.get("bids", [])]
+        asks = [(float(row[0]), float(row[1])) for row in item.get("asks", [])]
         if action == "snapshot":
             self._l2.apply_depth_snapshot(sym, "okx", bids, asks)
         else:
@@ -676,21 +635,13 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     def _handle_bitget_depth(self, msg: dict, sym: str) -> None:
-        """Handle Bitget books15 snapshot and update messages.
-
-        msg["action"] == "snapshot"  → full book
-        msg["action"] == "update"    → incremental diffs (qty 0 means delete)
-        data[0] has "bids": [[price, qty], ...]
-        """
         action = msg.get("action", "update")
         data   = msg.get("data", [])
         if not data:
             return
-        item     = data[0]
-        bids_raw = item.get("bids", [])
-        asks_raw = item.get("asks", [])
-        bids = [(float(p), float(q)) for p, q in bids_raw]
-        asks = [(float(p), float(q)) for p, q in asks_raw]
+        item = data[0]
+        bids = [(float(p), float(q)) for p, q in item.get("bids", [])]
+        asks = [(float(p), float(q)) for p, q in item.get("asks", [])]
         if action == "snapshot":
             self._l2.apply_depth_snapshot(sym, "bitget", bids, asks)
         else:
@@ -728,7 +679,6 @@ class ConnectionManager:
                         "time": t, "channel": "futures.trades",
                         "event": "subscribe", "payload": all_syms
                     }))
-                    # Subscribe to 100ms incremental depth for all symbols
                     for contract in all_syms:
                         await ws.send(json.dumps({
                             "time": t, "channel": "futures.order_book_update",
@@ -792,12 +742,6 @@ class ConnectionManager:
             await asyncio.sleep(RECONNECT_DELAY)
 
     def _handle_gate_depth(self, result: dict, gate_to_sym: dict) -> None:
-        """Handle Gate futures.order_book_update incremental diffs.
-
-        Gate always sends full levels in each diff (no separate snapshot
-        message type). qty 0 means the level was removed.
-        result fields: contract, bids: [{p, s}, ...], asks: [{p, s}, ...]
-        """
         contract  = result.get("contract", "")
         sym       = gate_to_sym.get(contract)
         if sym is None:
@@ -806,10 +750,6 @@ class ConnectionManager:
         asks_raw  = result.get("asks", [])
         bid_diffs = [(float(d["p"]), float(d["s"])) for d in bids_raw]
         ask_diffs = [(float(d["p"]), float(d["s"])) for d in asks_raw]
-        # Gate sends the first full update as an implicit snapshot.
-        # apply_depth_diff handles missing snapshot gracefully (no-op until
-        # snapshot arrives). For Gate we treat every message as a diff since
-        # there is no explicit snapshot/delta distinction in this channel.
         self._l2.apply_depth_diff(sym, "gate", bid_diffs, ask_diffs)
 
     async def _gate_ping(self, ws):
@@ -822,7 +762,7 @@ class ConnectionManager:
                 break
 
     # ------------------------------------------------------------------
-    # dYdX — trades only; no liquidation feed, no depth stream
+    # dYdX
     # ------------------------------------------------------------------
     async def _run_dydx(self, gen: int):
         from engine.state import SYMBOL_MAP
