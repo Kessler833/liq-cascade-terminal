@@ -36,11 +36,14 @@ class Strategy:
         self._liq_window: deque[tuple[float, float]] = deque()
 
         # Per-symbol current-second delta tracking.
-        # _second_ts holds the last seen wall-clock second (ts_ms // 1000)
-        # per symbol. When it advances, _second_delta resets to 0 before
-        # accumulating the new tick — giving a clean per-second snapshot.
         self._second_ts:    dict[str, int]   = {}
         self._second_delta: dict[str, float] = {}
+
+        # Lazy import reference to ImpactRecorder — set by ConnectionManager
+        # after both Strategy and ImpactRecorder are constructed, to break the
+        # circular dependency.  Used to check whether a cascade is active for
+        # a symbol before recording quiet lambda samples.
+        self._impact = None   # type: ignore
 
     # ------------------------------------------------------------------
     # Helpers
@@ -122,13 +125,29 @@ class Strategy:
             self._s.delta_bars.append({"t": c["t"], "delta": 0.0, "cum_delta": self._s.cumulative_delta})
 
     # ------------------------------------------------------------------
-    # Price tick
+    # Price tick — also drives Kyle's lambda
     # ------------------------------------------------------------------
     async def update_price_tick(self, price: float, notional: float, ts_ms: int, event_sym: str):
         if price <= 0:
             return
 
         self._s.sym_price[event_sym] = price
+
+        # ── Feed Kyle's lambda estimator ─────────────────────────────────────
+        estimator = self._s.kyle_lambdas.get(event_sym)
+        if estimator is not None:
+            ts_s      = ts_ms / 1000.0
+            cum_flow  = self._s.sym_impact_delta.get(event_sym, 0.0)
+            lam_result = estimator.update(price=price, cum_flow=cum_flow, ts=ts_s)
+
+            # Record quiet-phase baseline only when no active cascade for this sym.
+            # This keeps the baseline distribution free of cascade contamination.
+            cascade_active = (
+                self._impact is not None
+                and event_sym in self._impact.active
+            )
+            if not cascade_active and lam_result.n_buckets >= 1:
+                estimator.record_quiet_sample(ts_s)
 
         if event_sym != self._s.symbol:
             return
@@ -175,9 +194,7 @@ class Strategy:
             return
         s = self._s
 
-        # ---- Per-second snapshot delta (display / windowed use only) ----
-        # Resets each time the wall-clock second advances for this symbol.
-        # DO NOT use this for impact tank differencing — use sym_impact_delta.
+        # ── Per-second snapshot delta (display / windowed use only) ──────────
         current_second = ts_ms // 1000
         if self._second_ts.get(event_sym) != current_second:
             self._second_ts[event_sym]    = current_second
@@ -185,12 +202,10 @@ class Strategy:
         self._second_delta[event_sym] = self._second_delta.get(event_sym, 0.0) + vol_delta
         s.sym_snapshot_delta[event_sym] = self._second_delta[event_sym]
 
-        # ---- Monotonic impact delta (never resets — safe for differencing) ----
-        # ImpactRecorder._tick_all differences this to get per-200ms delta_tick.
-        # Because it never resets, there is no phantom spike at second boundaries.
+        # ── Monotonic impact delta (never resets — safe for differencing) ─────
         s.sym_impact_delta[event_sym] = s.sym_impact_delta.get(event_sym, 0.0) + vol_delta
 
-        # ---- Persist to delta_store at 1m resolution (for chart rebucketing) ----
+        # ── Persist to delta_store at 1m resolution ───────────────────────────
         bt1m = (ts_ms // 60_000) * 60_000
         sb = next((b for b in s.delta_store[event_sym] if b["t"] == bt1m), None)
         if sb is None:
@@ -198,7 +213,7 @@ class Strategy:
             s.delta_store[event_sym].append(sb)
         sb["delta"] += vol_delta
 
-        # ---- Active-symbol live chart + phase FSM ----
+        # ── Active-symbol live chart + phase FSM ─────────────────────────────
         if event_sym != s.symbol:
             return
 
