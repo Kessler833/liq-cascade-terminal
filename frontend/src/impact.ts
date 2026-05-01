@@ -1,31 +1,10 @@
 /**
  * impact.ts — Impact tab: table, stats, filters, pagination, detail charts.
  *
- * Table columns (new layout):
- *   checkbox | status | Time | Asset | Side | Cascade | Init LIQ | Total LIQ
- *   | Δ at Start | Initial Exp. | Final Exp. | Start | End | Diff
- *   | Error % | Duration | Absorbed
- *
- * Field meanings:
- *   Initial Exp.  — first bucket walk prediction when liq fired
- *   Final Exp.    — bucket walk prediction at the tick liq_remaining hit zero
- *   Start         — entry_price: real market price when first liq fired
- *   End           — tank_empty_price: real price when liq_remaining hit zero
- *   Diff          — End - Start: actual signed price move during the cascade
- *   Error %       — (final_expected - initial_expected) / entry_price * 100
- *   Duration      — first liq timestamp → moment liq_remaining hit zero
- *
- * Colouring rules:
- *   Init Δ  — green if the delta is "in favour" of the first liquidation:
- *             for a LONG liq (forced sell), negative delta (sell pressure) helps
- *             → green when delta < 0 for long side, green when delta > 0 for short side.
- *   Final Exp. — red if it does NOT match the End (tank_empty_price) column,
- *                i.e. the prediction diverged from where price actually landed.
- *
- * Detail charts (3 panels):
- *   1. Volume delta over cascade
- *   2. Predicted vs Actual price (COMBINED) — cyan=actual, solid=predicted
- *   3. Liq volume remaining (tank)
+ * v2 additions:
+ *   - lambda_ratio_at_onset column in table
+ *   - l2_structural_price shown in detail header (structural vs corrected prediction)
+ *   - lambda ratio colour-coded: green ≤ 1.5x, yellow ≤ 3x, red > 3x
  */
 
 import type { ImpactObs, ImpactStats } from './state';
@@ -46,9 +25,6 @@ let _allObs: ImpactObs[] = [];
 let _stats: ImpactStats  = { total: 0, recording: 0, avg_err: null, absorbed: 0 };
 let _charts: Record<string, any> = {};
 const _checkedIds = new Set<string>();
-// Permanent session-level set of deleted IDs.  Never cleared — this prevents
-// a stale WS impact_update broadcast (buffered while the HTTP DELETE was
-// in-flight) from re-inserting entries that the user already deleted.
 const _deletedIds = new Set<string>();
 
 // ---- public API ----
@@ -92,13 +68,9 @@ export function updateImpact(obs: ImpactObs[], stats: ImpactStats): void {
   }
 
   const existingIds = new Set(_allObs.map(o => o.id));
-  // Guard deleted IDs at the source: never treat a deleted entry as a new
-  // arrival, even if a stale WS broadcast carries it after the HTTP DELETE.
   const newEntries  = obs.filter(o => !existingIds.has(o.id) && !_deletedIds.has(o.id));
   if (newEntries.length) _allObs = [...newEntries, ..._allObs];
 
-  // Secondary sweep: remove any deleted IDs that may have slipped into
-  // _allObs through an earlier code path (e.g. the in-place update loop).
   if (_deletedIds.size) {
     _allObs = _allObs.filter(o => !_deletedIds.has(o.id));
   }
@@ -150,9 +122,6 @@ function syncDeleteBtn(): void {
 async function deleteSelected(): Promise<void> {
   if (_checkedIds.size === 0) return;
   const ids = [..._checkedIds];
-  // Register as permanently deleted before the optimistic UI update and
-  // before the HTTP request — any WS broadcast that arrives at any point
-  // after this will be blocked by the _deletedIds guard in updateImpact().
   ids.forEach(id => _deletedIds.add(id));
   _allObs = _allObs.filter(o => !_checkedIds.has(o.id));
   if (_selectedId && _checkedIds.has(_selectedId)) closeDetail();
@@ -193,24 +162,31 @@ function filtered(): ImpactObs[] {
   });
 }
 
-/**
- * Returns true when the initial_delta is "in favour" of the first liquidation.
- */
 function deltaInFavour(side: string, delta: number): boolean {
   if (side === 'long')  return delta < 0;
   if (side === 'short') return delta > 0;
   return false;
 }
 
-/**
- * Returns true when Final Exp. diverges from End (tank_empty_price).
- */
 function finalExpMatchesEnd(obs: ImpactObs): boolean {
   if (obs.final_expected_price == null || obs.tank_empty_price == null) return true;
   const ref = obs.tank_empty_price;
   if (ref === 0) return true;
   const pctDiff = Math.abs(obs.final_expected_price - ref) / ref;
   return pctDiff < 0.005;
+}
+
+/** Colour for lambda ratio: green ≤ 1.5x normal, yellow ≤ 3x, red > 3x */
+function lambdaColor(ratio: number | null): string {
+  if (ratio == null) return 'var(--text-faint)';
+  if (ratio <= 1.5)  return 'var(--text-muted)';
+  if (ratio <= 3.0)  return 'var(--yellow)';
+  return 'var(--red)';
+}
+
+function fmtLambdaRatio(ratio: number | null): string {
+  if (ratio == null) return '—';
+  return ratio.toFixed(2) + 'x';
 }
 
 function renderTable(): void {
@@ -272,6 +248,9 @@ function renderTable(): void {
       ? obs.cascade_duration_s.toFixed(1) + 's'
       : isRec ? 'recording…' : '—';
 
+    const lamColor = lambdaColor(obs.lambda_ratio_at_onset);
+    const lamFmt   = fmtLambdaRatio(obs.lambda_ratio_at_onset);
+
     const tdChk = el('td', 'imp-td imp-td-check');
     const chk   = document.createElement('input');
     chk.type      = 'checkbox';
@@ -298,6 +277,7 @@ function renderTable(): void {
       <td class="imp-td mono">${fmtUSD(obs.initial_liq_volume)}</td>
       <td class="imp-td mono">${fmtUSD(obs.total_liq_volume)}</td>
       <td class="imp-td mono" style="color:${deltaColor}">${fmtDelta(delta)}</td>
+      <td class="imp-td mono" style="color:${lamColor}" title="Kyle's lambda ratio at cascade onset">${lamFmt}</td>
       <td class="imp-td mono">${fmtPrice(obs.initial_expected_price)}</td>
       <td class="imp-td mono" style="color:${finalExpColor}">${obs.final_expected_price ? fmtPrice(obs.final_expected_price) : '—'}</td>
       <td class="imp-td mono" style="color:var(--text-muted)">${fmtPrice(obs.entry_price)}</td>
@@ -366,6 +346,40 @@ function fillDetailHeader(obs: ImpactObs): void {
   if (errEl) { errEl.textContent = fmtPct(obs.price_error_pct); errEl.style.color = errColor(obs.price_error_pct); }
   const absEl = document.getElementById('det-imp-abs');
   if (absEl) { absEl.textContent = obs.absorbed_by_delta ? 'YES' : 'NO'; absEl.style.color = obs.absorbed_by_delta ? 'var(--accent)' : 'var(--text-faint)'; }
+
+  // ── Lambda context ───────────────────────────────────────────────────────
+  let lamEl = document.getElementById('det-imp-lambda');
+  if (!lamEl) {
+    // Inject into det-meta if not in HTML yet
+    const meta = document.querySelector('.imp-det-meta');
+    if (meta) {
+      const kv = document.createElement('div');
+      kv.className = 'imp-det-kv';
+      kv.innerHTML = `<span class="imp-det-k">λ Ratio</span><span class="imp-det-v" id="det-imp-lambda">—</span>`;
+      meta.appendChild(kv);
+      lamEl = document.getElementById('det-imp-lambda');
+    }
+  }
+  if (lamEl) {
+    lamEl.textContent = fmtLambdaRatio(obs.lambda_ratio_at_onset);
+    lamEl.style.color = lambdaColor(obs.lambda_ratio_at_onset);
+  }
+
+  // ── L2 structural vs corrected ───────────────────────────────────────────
+  let structEl = document.getElementById('det-imp-structural');
+  if (!structEl) {
+    const meta = document.querySelector('.imp-det-meta');
+    if (meta) {
+      const kv = document.createElement('div');
+      kv.className = 'imp-det-kv';
+      kv.innerHTML = `<span class="imp-det-k">L2 Struct.</span><span class="imp-det-v" id="det-imp-structural" style="color:var(--text-faint)">—</span>`;
+      meta.appendChild(kv);
+      structEl = document.getElementById('det-imp-structural');
+    }
+  }
+  if (structEl) {
+    structEl.textContent = obs.l2_structural_price != null ? fmtPrice(obs.l2_structural_price) : '—';
+  }
 }
 
 function renderCutoffBanner(obs: ImpactObs): void {
@@ -443,25 +457,18 @@ function refLine(labels: string[], value: number, color: string): object {
   };
 }
 
-/**
- * Returns a Chart.js plugin that draws vertical orange dashed lines on the
- * chart canvas for each cascade join event (events[1+]).
- */
 function cascadeLinePlugin(
   events: [number, number, string][],
   series: TimeSeries,
   origin: number,
 ): object {
   if (events.length <= 1 || !series.length) return {};
-
   const labels = elapsedLabels(series, origin);
-
   const joinIndices: number[] = events.slice(1).map(([ts]) => {
     const elapsed = ((ts - origin) / 1000).toFixed(1) + 's';
     const idx = labels.findIndex(l => parseFloat(l) >= parseFloat(elapsed));
     return idx >= 0 ? idx : labels.length - 1;
   });
-
   return {
     id: 'cascadeLines',
     afterDraw(chart: any) {
@@ -469,28 +476,23 @@ function cascadeLinePlugin(
       const xAxis = chart.scales['x'];
       const yAxis = chart.scales['y'];
       if (!xAxis || !yAxis) return;
-
       ctx.save();
       ctx.strokeStyle = 'rgba(255,157,0,0.55)';
       ctx.lineWidth   = 1;
       ctx.setLineDash([3, 4]);
-
       for (let i = 0; i < joinIndices.length; i++) {
         const idx = joinIndices[i];
         const x   = xAxis.getPixelForTick(idx);
         if (x == null || isNaN(x)) continue;
-
         ctx.beginPath();
         ctx.moveTo(x, yAxis.top);
         ctx.lineTo(x, yAxis.bottom);
         ctx.stroke();
-
         const vol = events[i + 1][1];
         ctx.fillStyle = 'rgba(255,157,0,0.75)';
         ctx.font = '9px monospace';
         ctx.fillText('+' + fmtUSD(vol), x + 3, yAxis.top + 10);
       }
-
       ctx.restore();
     },
   };
@@ -522,7 +524,7 @@ function renderDetailCharts(obs: ImpactObs): void {
   const origin        = obs.timestamp;
   const cascadeEvents = obs.cascade_events ?? [];
 
-  // ── Chart 1: per-tick delta ───────────────────────────────────────────────
+  // Chart 1: delta
   const deltaSeries = obs.delta_series;
   if (deltaSeries && deltaSeries.length >= 1) {
     const labels = elapsedLabels(deltaSeries, origin);
@@ -548,26 +550,25 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // ── Chart 2: Predicted vs Actual price — COMBINED ────────────────────────
-  // Actual price (cyan solid) and predicted terminal price (side-colored solid)
-  // are overlaid on the same axes so the viewer can track how the prediction
-  // converges toward or diverges from the real price over the cascade lifetime.
+  // Chart 2: predicted vs actual price
   const expSeries   = obs.expected_price_series;
   const priceSeries = obs.price_series;
 
   if ((expSeries && expSeries.length >= 1) || (priceSeries && priceSeries.length >= 1)) {
-    // Use the longer series for the shared x-axis labels
     const longerSeries = (expSeries?.length ?? 0) >= (priceSeries?.length ?? 0)
       ? expSeries! : priceSeries!;
     const labels    = elapsedLabels(longerSeries, origin);
     const sideColor = obs.side === 'long' ? 'rgba(255,61,90,0.9)' : 'rgba(0,230,118,0.9)';
 
-    // Align shorter series to the label count — pad tail with null so Chart.js
-    // renders a clean line that simply stops rather than jumping to zero.
     const priceData: (number | null)[] = labels.map((_, i) =>
       priceSeries && i < priceSeries.length ? priceSeries[i][1] : null);
     const expData: (number | null)[] = labels.map((_, i) =>
       expSeries && i < expSeries.length ? expSeries[i][1] : null);
+
+    // L2 structural as a reference line (where book alone predicted)
+    const structuralRef = obs.l2_structural_price != null
+      ? [refLine(labels, obs.l2_structural_price, 'rgba(168,85,247,0.35)')]
+      : [];
 
     const canvas = getCanvas('imp-chart-price-exp');
     if (canvas) {
@@ -576,71 +577,23 @@ function renderDetailCharts(obs: ImpactObs): void {
         data: {
           labels,
           datasets: [
-            // Actual price — thicker cyan, solid
-            {
-              label: 'Actual',
-              data: priceData,
-              borderColor: 'rgba(0,212,255,0.9)',
-              borderWidth: 2,
-              pointRadius: 0,
-              tension: 0.25,
-              fill: false,
-              spanGaps: true,
-            },
-            // Predicted terminal price — side-colored, solid
-            {
-              label: 'Predicted',
-              data: expData,
-              borderColor: sideColor,
-              borderWidth: 2,
-              pointRadius: 0,
-              tension: 0.25,
-              fill: false,
-              spanGaps: true,
-            },
-            // Reference: entry price (gray)
+            { label: 'Actual',    data: priceData, borderColor: 'rgba(0,212,255,0.9)',  borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false, spanGaps: true },
+            { label: 'Predicted', data: expData,   borderColor: sideColor,              borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false, spanGaps: true },
             refLine(labels, obs.entry_price, 'rgba(122,132,153,0.4)'),
-            // Reference: where tank emptied (orange)
-            ...(obs.tank_empty_price != null
-              ? [refLine(labels, obs.tank_empty_price, 'rgba(255,157,0,0.55)')]
-              : []),
-            // Reference: final predicted price (purple)
-            ...(obs.final_expected_price != null
-              ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.4)')]
-              : []),
+            ...(obs.tank_empty_price != null ? [refLine(labels, obs.tank_empty_price, 'rgba(255,157,0,0.55)')] : []),
+            ...(obs.final_expected_price != null ? [refLine(labels, obs.final_expected_price, 'rgba(168,85,247,0.4)')] : []),
+            ...structuralRef,
           ],
         },
         options: {
-          animation: false,
-          responsive: true,
-          maintainAspectRatio: false,
+          animation: false, responsive: true, maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
           plugins: {
-            legend: {
-              display: true,
-              labels: {
-                color: '#7a8499',
-                font: { size: 9 },
-                boxWidth: 20,
-                padding: 6,
-                // Only show the first two datasets (Actual + Predicted)
-                filter: (item: any) => item.datasetIndex < 2,
-              },
-            },
+            legend: { display: true, labels: { color: '#7a8499', font: { size: 9 }, boxWidth: 20, padding: 6, filter: (item: any) => item.datasetIndex < 2 } },
             tooltip: {
-              backgroundColor: '#0e1014',
-              borderColor: '#1f2430',
-              borderWidth: 1,
-              titleColor: '#e2e8f0',
-              bodyColor: '#7a8499',
-              callbacks: {
-                label: (item: any) => {
-                  if (item.raw == null) return null;
-                  const names = ['Actual', 'Predicted'];
-                  const name  = names[item.datasetIndex];
-                  return name ? `${name}: ${fmtPrice(item.raw)}` : fmtPrice(item.raw);
-                },
-              },
+              backgroundColor: '#0e1014', borderColor: '#1f2430', borderWidth: 1,
+              titleColor: '#e2e8f0', bodyColor: '#7a8499',
+              callbacks: { label: (item: any) => { if (item.raw == null) return null; const names = ['Actual','Predicted']; const name = names[item.datasetIndex]; return name ? `${name}: ${fmtPrice(item.raw)}` : fmtPrice(item.raw); } },
             },
           },
           scales: {
@@ -653,7 +606,7 @@ function renderDetailCharts(obs: ImpactObs): void {
     }
   }
 
-  // ── Chart 3: liq remaining (depleting tank) ───────────────────────────────
+  // Chart 3: liq remaining tank
   const liqSeries = obs.liq_remaining_series;
   if (liqSeries && liqSeries.length >= 1) {
     const labels    = elapsedLabels(liqSeries, origin);
