@@ -158,6 +158,13 @@ class AppState:
     # Updated by each exchange trade handler; reset to "binance" on symbol switch.
     price_source: str = "binance"
 
+    # ── Kyle's lambda estimators — one per symbol ────────────────────────────
+    # Populated by ConnectionManager.start() after symbols are known.
+    # strategy.py feeds every trade tick in; impact.py reads current() at
+    # cascade onset and in the close condition check.
+    # Type: dict[str, KyleLambda]  — imported lazily to avoid circular imports.
+    kyle_lambdas: dict = field(default_factory=dict)   # sym -> KyleLambda
+
     def reset_stats(self):
         self.total_liq         = 0.0
         self.total_liq_events  = 0
@@ -181,4 +188,5 @@ class AppState:
         self.exchanges         = _default_exchanges()
         self.price_source      = "binance"
         # sym_price, sym_snapshot_delta, sym_impact_delta,
-        # exchange_latencies, and snapshot_calc_us survive symbol switches.
+        # exchange_latencies, snapshot_calc_us, and kyle_lambdas
+        # survive symbol switches — estimators keep their baseline history.
