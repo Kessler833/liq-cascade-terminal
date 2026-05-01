@@ -1,6 +1,8 @@
 /**
  * Chart rendering — lightweight-charts v4.
- * Three panels: price (candlestick), liq bars (histogram), delta (histogram + line).
+ * Three panels: price (candlestick), liq bars (histogram + lambda line), delta (histogram + line).
+ *
+ * v2: Kyle's lambda ratio line overlaid on the liq chart (orange, bottom 25%).
  */
 import {
   createChart, ColorType, CrosshairMode,
@@ -93,11 +95,6 @@ export function updatePriceChart(candles: Candle[]) {
   (candleSeries as any).setMarkers(markers);
 }
 
-/**
- * O(1) single-bar update for live tick data.
- * Use instead of updatePriceChart() on every trade tick to avoid
- * rebuilding the entire series on each message.
- */
 export function updateLastBar(candle: Candle) {
   if (!candleSeries) return;
   candleSeries.update({
@@ -113,9 +110,11 @@ export function updateLastBar(candle: Candle) {
 let liqChart:       IChartApi | null = null;
 let liqLongSeries:  ISeriesApi<'Histogram'> | null = null;
 let liqShortSeries: ISeriesApi<'Histogram'> | null = null;
+let liqLambdaLine:  ISeriesApi<'Line'>      | null = null;
 
 export function initLiqChart(container: HTMLElement) {
   liqChart = createChart(container, baseOpts(container));
+
   liqLongSeries = liqChart.addHistogramSeries({
     color: DARK.long, priceScaleId: 'liq',
     priceFormat: { type: 'volume' },
@@ -124,6 +123,28 @@ export function initLiqChart(container: HTMLElement) {
     color: DARK.short, priceScaleId: 'liq',
     priceFormat: { type: 'volume' },
   });
+
+  // Kyle's lambda ratio — orange line, occupies bottom 25% of liq chart
+  liqLambdaLine = liqChart.addLineSeries({
+    color:                  'rgba(255,157,0,0.9)',
+    lineWidth:              1,
+    priceScaleId:           'lambda',
+    priceFormat:            { type: 'price', precision: 2, minMove: 0.01 },
+    title:                  'λ',
+    crosshairMarkerVisible: false,
+    lastValueVisible:       true,
+  });
+
+  // Lambda occupies bottom 22% so it sits below the liq histogram
+  liqChart.priceScale('lambda').applyOptions({
+    scaleMargins: { top: 0.78, bottom: 0.02 },
+    borderVisible: false,
+    drawTicks:     false,
+  });
+  liqChart.priceScale('liq').applyOptions({
+    scaleMargins: { top: 0.02, bottom: 0.24 },
+  });
+
   window.addEventListener('resize', () => {
     liqChart?.applyOptions({ width: container.clientWidth, height: container.clientHeight });
   });
@@ -141,6 +162,29 @@ export function updateLiqChart(bars: LiqBar[]) {
     .map(b => ({ time: (b.t / 1000) as any, value: -b.short_usd }));
   liqLongSeries.setData(longs);
   liqShortSeries.setData(shorts);
+}
+
+/**
+ * Update the lambda ratio line on the liq chart with a single new point.
+ * Called on every "lambda" WS message (every ~5 seconds).
+ */
+export function updateLiqLambdaPoint(ts_ms: number, ratio: number) {
+  if (!liqLambdaLine) return;
+  liqLambdaLine.update({ time: (ts_ms / 1000) as any, value: ratio });
+}
+
+/**
+ * Seed the lambda line with historical data when history is loaded.
+ * Called with the lambda_history array from client state.
+ */
+export function setLiqLambdaData(points: { ts: number; ratio: number }[]) {
+  if (!liqLambdaLine || !points.length) return;
+  const seen = new Set<number>();
+  const data: LineData[] = points
+    .slice().sort((a, b) => a.ts - b.ts)
+    .filter(p => { const t = (p.ts / 1000) | 0; if (seen.has(t)) return false; seen.add(t); return true; })
+    .map(p => ({ time: (p.ts / 1000) as any, value: p.ratio }));
+  liqLambdaLine.setData(data);
 }
 
 // ---- Delta chart --------------------------------------------------------
@@ -206,8 +250,8 @@ export function shiftVisibleRange(by: number) {
 
 /**
  * Scrolls all three charts to the latest candle.
- * Calls scrollToRealTime() directly on each chart while holding the sync
- * guard, so the sync subscribers don't fight each other and revert the scroll.
+ * Uses scrollToRealTime() on each chart while holding the sync guard so
+ * the sync subscribers don't fight each other.
  */
 export function scrollToLatest() {
   _syncing = true;
@@ -217,23 +261,25 @@ export function scrollToLatest() {
   _syncing = false;
 }
 
-/** Returns the current visible logical range of the price chart. */
 export function getVisibleLogicalRange() {
   return priceChart?.timeScale().getVisibleLogicalRange() ?? null;
 }
 
-/** Sets the visible logical range; liq + delta follow via sync. */
 export function setVisibleLogicalRange(range: { from: number; to: number }) {
   priceChart?.timeScale().setVisibleLogicalRange(range);
 }
 
-/** Fits all candles into view. */
 export function fitAllCharts() {
   priceChart?.timeScale().fitContent();
 }
 
 let _syncing = false;
 
+/**
+ * Keeps all three chart time scales in lockstep.
+ * When any chart is scrolled or zoomed, the other two follow immediately.
+ * This guarantees all charts always end at the same point.
+ */
 export function setupChartSync() {
   const all = [priceChart, liqChart, deltaChart].filter(Boolean) as IChartApi[];
   for (const source of all) {
