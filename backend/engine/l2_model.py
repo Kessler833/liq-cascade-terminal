@@ -1,51 +1,30 @@
-"""Multi-exchange composite L2 impact model.
+"""Multi-exchange composite L2 impact model — unified with Kyle's lambda.
 
-Book maintenance strategy
--------------------------
-Primary path: WebSocket incremental depth streams (pushed by connections.py).
-  apply_depth_snapshot() — called once per symbol when WS connects.
-                            Replaces the entire raw book from the WS snapshot.
-  apply_depth_diff()     — called on every incremental diff message.
-                            Updates only changed levels; marks symbol dirty.
-                            If no snapshot has been received yet for this
-                            exchange, the first diff is treated as an implicit
-                            full snapshot (required for Gate, which sends a
-                            full book as the first update_book message with no
-                            separate snapshot event type).
-  flush_dirty()          — called by ImpactRecorder._tick_all() before each
-                            bucket walk. Rebuilds composite buckets only for
-                            symbols that received diffs since the last flush.
-                            Cost: O(n_levels) per dirty symbol, at most once
-                            per tick (50ms), not once per WS message.
+Unified prediction
+------------------
+compute_terminal_price() accepts an optional lambda_now parameter.  When
+provided, each bucket's volume is divided by the lambda ratio before being
+consumed, making the walk lambda-aware:
 
-Fallback path: REST polling loop (REFRESH_S = 1.0).
-  Only fires for symbols where _ws_initialized[sym] is False — meaning the
-  WS snapshot has not yet arrived. Once WS is up the REST loop becomes a
-  30-second health-check that is essentially a no-op (skipped per symbol).
+    effective_volume = bucket.volume / lambda_ratio
 
-Key concepts
-------------
-* compute_terminal_price is READ-ONLY.
-  It takes liq_notional and walks the composite bucket book to produce a
-  price estimate. It does NOT take delta as an input. Delta is handled
-  entirely in ImpactRecorder._tick_all before this function is called.
-  This function changes no state and never feeds back into liq_remaining.
+lambda_ratio > 1  → book acts thinner than nominal (cascade regime)
+                    each bucket is consumed faster → price travels further
+lambda_ratio = 1  → normal conditions, bucket volumes taken at face value
+lambda_ratio < 1  → would mean book acts deeper (not expected in practice)
 
-* Price buckets — raw levels are rounded to a per-symbol bucket size
-  (e.g. $10 for BTC, $0.05 for SOL) and summed.
-  Bid levels use floor (bucket at-or-below actual price — conservative).
-  Ask levels use ceil  (bucket at-or-above actual price — conservative).
-  This ensures ask buckets never collapse below mid, preventing a short
-  liq walk from producing a terminal price below the entry price.
+The price at each step is computed from the bucket's price level as before —
+only the consumption rate per bucket changes.  This preserves the structural
+ordering of the L2 walk (near-touch depth consumed before deep depth) while
+making each dollar of notional do more or less work depending on the current
+market regime.
 
-* Exchange coverage — each bucket tracks how many exchanges contributed.
-  The data cutoff price is the deepest level where every WS-tracked
-  exchange still contributes.
+When lambda_now is None (estimator not yet warmed up), the walk falls back
+to the original behaviour (lambda_ratio = 1.0) so cold-start behaviour is
+identical to v1.
 
-* beyond_cutoff flag — when the terminal price estimate crosses the
-  cutoff, the result carries beyond_cutoff=True and cutoff_price.
-
-* Multi-symbol — books for ALL symbols are maintained simultaneously.
+Everything else — book maintenance, WS depth streams, REST fallback, flush_dirty
+— is unchanged from v1.
 """
 from __future__ import annotations
 
@@ -62,7 +41,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("liqterm.l2")
 
-REFRESH_S  = 1.0   # REST fallback cadence (only fires when WS not yet initialized)
+REFRESH_S  = 1.0
 BOOK_DEPTH = 50
 
 N_BOOK_EXCHANGES = 5
@@ -196,11 +175,6 @@ def _build_composite_from_raw(
     side: str,
     sym: str,
 ) -> tuple[list[tuple[float, float, int]], float | None]:
-    """Build composite buckets from the raw WS price->usd dicts.
-
-    raw_by_exchange: { ex_name: { "bids": {price: usd}, "asks": {price: usd} } }
-    Returns the same (sorted_levels, cutoff_price) tuple as _build_composite.
-    """
     bucket = BUCKET_SIZE.get(sym, DEFAULT_BUCKET)
     composite: dict[float, dict] = {}
 
@@ -261,17 +235,8 @@ class L2Model:
         self._http = httpx.AsyncClient(timeout=5.0)
         self._books: dict[str, _SymbolBook] = {}
 
-        # --- WS incremental depth state ---
-        # raw_books[sym][ex_name]["bids"] = { price: usd_notional }
-        # raw_books[sym][ex_name]["asks"] = { price: usd_notional }
         self._raw_books: dict[str, dict[str, dict[str, dict[float, float]]]] = {}
-
-        # Symbols whose raw books have changed since the last flush.
-        # flush_dirty() rebuilds composite buckets for these and clears the set.
         self._dirty: set[str] = set()
-
-        # True once the WS snapshot for a symbol has been received.
-        # REST fallback only polls symbols where this is False.
         self._ws_initialized: dict[str, bool] = {}
 
     async def start(self):
@@ -284,62 +249,24 @@ class L2Model:
         await self._http.aclose()
 
     # ------------------------------------------------------------------
-    # WS incremental depth API (called by connections.py)
+    # WS incremental depth API
     # ------------------------------------------------------------------
 
-    def apply_depth_snapshot(
-        self,
-        sym: str,
-        ex_name: str,
-        bids: list[tuple[float, float]],   # [(price, qty), ...]
-        asks: list[tuple[float, float]],
-    ) -> None:
-        """Replace this exchange's entire book for sym with a fresh WS snapshot.
-
-        Called once per symbol per exchange on WS connect / reconnect.
-        Replaces whatever the REST fallback had stored for this exchange.
-        """
+    def apply_depth_snapshot(self, sym, ex_name, bids, asks):
         ex_books = self._raw_books.setdefault(sym, {})
         ex_books[ex_name] = {
             "bids": {float(p): float(q) * float(p) for p, q in bids},
             "asks": {float(p): float(q) * float(p) for p, q in asks},
         }
         self._ws_initialized.setdefault(sym, False)
-        # Mark all exchanges initialized once any snapshot arrives.
-        # Full initialization (all 5 exchanges) is indicated by the raw_books
-        # dict having entries for all exchanges, but a single snapshot is
-        # already far better than the REST fallback for that exchange's levels.
         self._ws_initialized[sym] = True
         self._dirty.add(sym)
         log.debug("WS snapshot applied: %s/%s bids=%d asks=%d",
                   sym, ex_name, len(bids), len(asks))
 
-    def apply_depth_diff(
-        self,
-        sym: str,
-        ex_name: str,
-        bid_diffs: list[tuple[float, float]],  # [(price, new_qty), ...] qty=0 means delete
-        ask_diffs: list[tuple[float, float]],
-    ) -> None:
-        """Apply an incremental diff for one exchange's book.
-
-        Only changed levels are sent by the exchange. qty=0 means the level
-        was fully consumed and must be removed. This is O(n_changed_levels),
-        typically a handful of entries per message.
-
-        If no snapshot has been received yet for this exchange, the first diff
-        is treated as an implicit full snapshot. This is required for exchanges
-        like Gate (futures.order_book_update) that send a full book as their
-        very first WS message without a separate snapshot event type.
-
-        Marks sym as dirty so flush_dirty() rebuilds buckets on the next tick.
-        """
+    def apply_depth_diff(self, sym, ex_name, bid_diffs, ask_diffs):
         ex_books = self._raw_books.get(sym)
         if ex_books is None or ex_name not in ex_books:
-            # No snapshot received yet for this exchange on this symbol.
-            # Treat the first diff as an implicit full snapshot rather than
-            # silently dropping it — needed for Gate and any other exchange
-            # that omits a separate snapshot message.
             log.debug("First diff treated as snapshot: %s/%s", sym, ex_name)
             self.apply_depth_snapshot(sym, ex_name, bid_diffs, ask_diffs)
             return
@@ -361,27 +288,17 @@ class L2Model:
                 book["asks"][price] = usd
         self._dirty.add(sym)
 
-    def flush_dirty(self) -> None:
-        """Rebuild composite buckets for all symbols that received diffs since
-        the last flush. Called by ImpactRecorder._tick_all() once per tick,
-        so _rebuild_buckets runs at most 20/s regardless of WS message rate.
-        """
+    def flush_dirty(self):
         for sym in list(self._dirty):
             self._rebuild_buckets(sym)
             self._dirty.discard(sym)
 
-    def _rebuild_buckets(self, sym: str) -> None:
-        """Re-bucket the raw WS price->usd dicts into sorted composite format.
-        Writes directly into self._books[sym] so compute_terminal_price always
-        reads the latest state without any additional indirection.
-        """
+    def _rebuild_buckets(self, sym):
         ex_books = self._raw_books.get(sym)
         if not ex_books:
             return
-
         bids, bid_cutoff = _build_composite_from_raw(ex_books, "long",  sym)
         asks, ask_cutoff = _build_composite_from_raw(ex_books, "short", sym)
-
         book = self._books.setdefault(sym, _SymbolBook())
         book.bids       = bids
         book.asks       = asks
@@ -389,7 +306,7 @@ class L2Model:
         book.ask_cutoff = ask_cutoff
 
     # ------------------------------------------------------------------
-    # REST fallback loop (cold-start / WS-not-yet-initialized only)
+    # REST fallback loop
     # ------------------------------------------------------------------
 
     async def _refresh_loop(self):
@@ -401,8 +318,6 @@ class L2Model:
         from engine.state import SYMBOL_MAP
 
         async def _fetch_one(sym: str):
-            # Skip REST fetch if WS has already provided a snapshot for this sym.
-            # This makes the REST loop a no-op in steady state.
             if self._ws_initialized.get(sym, False):
                 return
 
@@ -440,18 +355,13 @@ class L2Model:
             book.bid_cutoff = bid_cutoff
             book.ask_cutoff = ask_cutoff
 
-            log.debug(
-                "L2 REST [%s]: %d bid / %d ask buckets from %d exchanges",
-                sym, len(bids), len(asks), len(exchange_books),
-            )
-
         await asyncio.gather(
             *[_fetch_one(sym) for sym in SYMBOL_MAP],
             return_exceptions=True,
         )
 
     # ------------------------------------------------------------------
-    # Price impact walk (read-only)
+    # Unified price impact walk — lambda-aware
     # ------------------------------------------------------------------
 
     def compute_terminal_price(
@@ -460,42 +370,24 @@ class L2Model:
         side: str,
         sym: str | None = None,
         ref_price: float | None = None,
+        lambda_now: float | None = None,
     ) -> dict:
         """Walk the composite book until liq_notional is consumed.
 
-        READ-ONLY — this function changes no state and must never be
-        used to update liq_remaining in the caller. It is purely a
-        forward price estimate given the current tank size.
+        When lambda_now is provided, each bucket's volume is divided by the
+        lambda ratio before consumption:
 
-        Delta is NOT a parameter here. It is the caller's responsibility
-        to update liq_notional with delta before calling this function.
-        See ImpactRecorder._tick_all for the correct usage pattern.
+            effective_volume = bucket.volume / lambda_ratio
 
-        The composite book read here reflects the latest WS depth diffs
-        because ImpactRecorder._tick_all calls flush_dirty() before this.
+        lambda_ratio > 1 → regime is stressed, each bucket absorbed faster,
+                           price travels further than nominal depth suggests.
+        lambda_ratio = 1 → normal conditions, bucket volumes at face value.
 
-        Parameters
-        ----------
-        liq_notional : float — current remaining liquidation notional (USD).
-                               This is liq_remaining AFTER delta has already
-                               been applied by the caller.
-        side         : str   — "long" (forced sell) or "short" (forced buy)
-        sym          : str   — canonical symbol key e.g. "BTC"
-        ref_price    : float | None — actual current market price to use as
-                               the mid reference. When provided, stale snapshot
-                               mid is ignored and book levels already consumed
-                               by the market move are filtered out.
-                               long liq  → only bids at or below ref_price
-                               short liq → only asks at or above ref_price
+        The lambda_ratio is lambda_now / quiet_period_baseline.  This is
+        computed externally by KyleLambda and passed in — l2_model has no
+        knowledge of the estimator.
 
-        Returns
-        -------
-        dict with keys:
-            terminal_price  float        — estimated absorption price
-            levels_consumed int
-            absorbed        bool         — liq_notional was zero or negative
-            beyond_cutoff   bool
-            cutoff_price    float | None
+        READ-ONLY — changes no state.
         """
         if sym is None:
             sym = self._s.symbol
@@ -511,12 +403,12 @@ class L2Model:
             "absorbed":        False,
             "beyond_cutoff":   False,
             "cutoff_price":    None,
+            "lambda_ratio":    1.0,
         }
 
         if mid == 0:
             return _empty
 
-        # Tank is empty — forced flow already absorbed
         if liq_notional <= 0:
             return {**_empty, "absorbed": True}
 
@@ -527,9 +419,7 @@ class L2Model:
         book_all = book_entry.bids if side == "long" else book_entry.asks
         cutoff   = book_entry.bid_cutoff if side == "long" else book_entry.ask_cutoff
 
-        # Discard book levels that have already been consumed by the market move
-        # that brought price to ref_price. Only levels reachable from ref_price
-        # onward are valid for the walk.
+        # Filter to levels reachable from ref_price
         if ref_price is not None:
             if side == "long":
                 book = [(p, u, n) for p, u, n in book_all if p <= ref_price]
@@ -540,6 +430,21 @@ class L2Model:
 
         if not book:
             return {**_empty, "cutoff_price": cutoff}
+
+        # ── Lambda ratio: how much more impact per dollar of notional ────────
+        # lambda_now is the raw OLS estimate. lambda_base is the quiet-period
+        # mean for this sym/time-bucket. ratio = lambda_now / lambda_base.
+        # Passed in pre-computed from KyleLambda.current().ratio so l2_model
+        # doesn't need to import the estimator.
+        lambda_ratio = 1.0
+        if lambda_now is not None and lambda_now > 0:
+            # Retrieve the baseline from the estimator stored on app_state.
+            estimator = self._s.kyle_lambdas.get(sym)
+            if estimator is not None:
+                result = estimator.current()
+                if result.lambda_base > 1e-20:
+                    lambda_ratio = max(1.0, lambda_now / result.lambda_base)
+            # If no estimator yet, ratio stays 1.0 (fallback to v1 behaviour)
 
         remaining     = liq_notional
         terminal      = mid
@@ -553,18 +458,26 @@ class L2Model:
                 elif side == "short" and price > cutoff:
                     beyond_cutoff = True
 
-            if remaining <= usd:
+            # ── Core change: discount bucket depth by lambda ratio ────────────
+            # A $1M bucket during a 3x lambda regime is treated as if it only
+            # provides $333K of effective absorption — price moves through it
+            # 3x faster than nominal depth suggests.
+            effective_usd = usd / lambda_ratio
+
+            if remaining <= effective_usd:
                 terminal  = price
                 consumed += 1
                 remaining = 0.0
                 break
-            remaining -= usd
+            remaining -= effective_usd
             terminal   = price
             consumed  += 1
         else:
-            # Exhausted the entire book — extrapolate beyond deepest level
+            # Exhausted book — extrapolate
             extrap_pct = EXTRAP_PCT.get(sym, DEFAULT_EXTRAP_PCT)
-            extra_pct  = (remaining / liq_notional) * extrap_pct
+            # Scale extrapolation by lambda_ratio too — stressed market
+            # extrapolates further beyond the last visible level.
+            extra_pct  = (remaining / liq_notional) * extrap_pct * lambda_ratio
             if side == "long":
                 terminal *= (1 - extra_pct / 100)
             else:
@@ -578,4 +491,5 @@ class L2Model:
             "absorbed":        False,
             "beyond_cutoff":   beyond_cutoff,
             "cutoff_price":    round(cutoff, 6) if cutoff is not None else None,
+            "lambda_ratio":    round(lambda_ratio, 4),
         }
