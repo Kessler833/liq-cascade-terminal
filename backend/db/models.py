@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS cascade_observations (
     price_series            TEXT,
     liq_remaining_series    TEXT,
     cascade_events_json     TEXT,
-    label_filled            INTEGER NOT NULL DEFAULT 0
+    label_filled            INTEGER NOT NULL DEFAULT 0,
+    lambda_ratio_at_onset   REAL,
+    l2_structural_price     REAL
 )
 """
 
@@ -84,4 +86,7 @@ CASCADE_OBS_REQUIRED_COLUMNS: list[tuple[str, str]] = [
     ("liq_remaining_series",    "TEXT"),
     ("cascade_events_json",     "TEXT"),
     ("label_filled",            "INTEGER"),
+    # v2 additions — added via _migrate_sync on existing DBs
+    ("lambda_ratio_at_onset",   "REAL"),
+    ("l2_structural_price",     "REAL"),
 ]
