@@ -77,6 +77,7 @@ export interface ImpactObs {
   // v2 — Kyle's lambda fields
   lambda_ratio_at_onset: number | null;
   l2_structural_price: number | null;
+  lambda_series: [number, number][] | null;
 }
 
 export interface ImpactStats {
@@ -105,7 +106,8 @@ export type ServerMsg =
   | { type: 'timeframe_change'; timeframe: string }
   | { type: 'impact_update';   observations: ImpactObs[]; stats: ImpactStats }
   | { type: 'pong';            ts: number }
-  | { type: 'perf';            snapshot_calc_us: number; exchange_latencies: Record<string, number>; price_source: string };
+  | { type: 'perf';            snapshot_calc_us: number; exchange_latencies: Record<string, number>; price_source: string }
+  | { type: 'lambda';          sym: string; ts: number; ratio: number; cascade_armed: boolean; lambda_now: number };
 
 // ---------------------------------------------------------------------------
 // Runtime client state
@@ -125,6 +127,7 @@ export interface ClientState {
   connected_ws: number;
   conn_status: Record<string, string>;
   impact_obs: ImpactObs[];
+  lambda_history: { ts: number; ratio: number }[];  // rolling ~500 points for liq chart line
 }
 
 const _defaultExchanges = (): Record<ExchangeName, { long: number; short: number }> => ({
@@ -167,4 +170,5 @@ export const state: ClientState = {
     dydx:    'connecting',
   },
   impact_obs: [],
+  lambda_history: [],
 };
