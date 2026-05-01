@@ -45,6 +45,47 @@ export interface Stats {
   exchanges: Record<ExchangeName, { long: number; short: number }>;
 }
 
+export interface ImpactObs {
+  id: string;
+  asset: string;
+  timestamp: number;
+  last_liq_ts: number;
+  entry_price: number;
+  side: string;
+  exchange: string;
+  cascade_size: number;
+  initial_liq_volume: number;
+  total_liq_volume: number;
+  initial_delta: number | null;
+  initial_expected_price: number | null;
+  final_expected_price: number | null;
+  tank_empty_ts: number | null;
+  tank_empty_price: number | null;
+  price_difference: number | null;
+  price_error_pct: number | null;
+  cascade_duration_s: number | null;
+  absorbed_by_delta: boolean;
+  label_filled: number;
+  liq_remaining: number;
+  beyond_cutoff: boolean;
+  cutoff_price: number | null;
+  delta_series: [number, number][];
+  expected_price_series: [number, number][];
+  price_series: [number, number][];
+  liq_remaining_series: [number, number][];
+  cascade_events: [number, number, string][];
+  // v2 — Kyle's lambda fields
+  lambda_ratio_at_onset: number | null;
+  l2_structural_price: number | null;
+}
+
+export interface ImpactStats {
+  total: number;
+  recording: number;
+  avg_err: number | null;
+  absorbed: number;
+}
+
 export type ServerMsg =
   | { type: 'snapshot';        symbol: string; timeframe: string; price: number; phase: Phase;
       candles: Candle[]; liq_bars: LiqBar[]; delta_bars: DeltaBar[];
@@ -62,12 +103,12 @@ export type ServerMsg =
   | { type: 'history';         candles: Candle[]; liq_bars?: LiqBar[]; delta_bars?: DeltaBar[]; price: number }
   | { type: 'symbol_change';   symbol: string }
   | { type: 'timeframe_change'; timeframe: string }
-  | { type: 'impact_update';   observations: any[]; stats: any }
+  | { type: 'impact_update';   observations: ImpactObs[]; stats: ImpactStats }
   | { type: 'pong';            ts: number }
   | { type: 'perf';            snapshot_calc_us: number; exchange_latencies: Record<string, number>; price_source: string };
 
 // ---------------------------------------------------------------------------
-// Runtime client state — single mutable object shared across all modules.
+// Runtime client state
 // ---------------------------------------------------------------------------
 
 export interface ClientState {
@@ -83,7 +124,7 @@ export interface ClientState {
   stats: Stats;
   connected_ws: number;
   conn_status: Record<string, string>;
-  impact_obs: any[];
+  impact_obs: ImpactObs[];
 }
 
 const _defaultExchanges = (): Record<ExchangeName, { long: number; short: number }> => ({
