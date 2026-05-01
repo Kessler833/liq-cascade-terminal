@@ -16,6 +16,7 @@ import {
 import {
   initPriceChart, initLiqChart, initDeltaChart,
   updatePriceChart, updateLastBar, updateLiqChart, updateDeltaChart,
+  updateLiqLambdaPoint, setLiqLambdaData,
   resizeAll, setupChartSync,
   onNearLeftEdge, getVisibleLogicalRange, setVisibleLogicalRange,
   scrollToLatest,
@@ -82,6 +83,9 @@ initControls(
     prependLogItem({ msg: `Switching to ${sym}...`, type: 'sys', ts: Date.now() });
     api.setSymbol(sym);
     state.symbol = sym;
+    // Clear lambda history on symbol switch — new symbol has different baseline
+    state.lambda_history = [];
+    setLiqLambdaData([]);
     try {
       const data = await api.fetchHistory(sym, state.timeframe);
       if (state.symbol !== sym) return;
@@ -133,12 +137,11 @@ function ensureAuxSlot(t: number) {
   }
 }
 
-/** Returns true when the IMPACT tab is currently visible. */
 function impactTabVisible(): boolean {
   return !document.getElementById('impact-screen')?.classList.contains('hidden');
 }
 
-// ---- RTT refresh — update WS ping chip every 2s from latest measured RTT ----
+// ---- RTT refresh ----
 setInterval(() => {
   const rtt = getWsRtt();
   if (rtt > 0) updatePerfChips({ wsRtt: rtt });
@@ -163,9 +166,7 @@ onMessage((msg: ServerMsg) => {
       updatePrice(state.price);
       updatePhase(state.phase);
       updateStats(msg.stats);
-      // Show initial price source from snapshot
       if (msg.price_source) updatePerfChips({ priceSrc: msg.price_source });
-      // Show current-candle bar delta from the last delta bar
       const lastDBar = state.delta_bars.at(-1);
       if (lastDBar) updateBarDelta(lastDBar.delta);
       if (msg.conn_status) {
@@ -177,6 +178,8 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      // Re-seed lambda line from history on reconnect
+      if (state.lambda_history.length) setLiqLambdaData(state.lambda_history);
       scrollToLatest();
       renderFeed(state.feed);
       renderLog(state.signal_log);
@@ -206,7 +209,6 @@ onMessage((msg: ServerMsg) => {
         updateLiqChart(state.liq_bars);
         updateDeltaChart(state.delta_bars);
         updateStatusBar({ candles: state.candles.length, lastUpdate: true });
-        // New candle opened — bar delta resets to 0
         updateBarDelta(0);
       }
       break;
@@ -274,14 +276,10 @@ onMessage((msg: ServerMsg) => {
     }
 
     case 'delta': {
-      // Update stats cumulative for the impact model (internal state only)
       if (state.stats) {
         state.stats.cumulative_delta = msg.cum_delta;
       }
-      // Update the strategy-bar display with the CURRENT CANDLE bar delta —
-      // this resets each candle and stays in a human-readable range.
       updateBarDelta(msg.bar_delta);
-
       const last = state.delta_bars.at(-1);
       if (last) {
         last.delta     = msg.bar_delta;
@@ -342,8 +340,9 @@ onMessage((msg: ServerMsg) => {
       updatePriceChart(state.candles);
       updateLiqChart(state.liq_bars);
       updateDeltaChart(state.delta_bars);
+      // Re-seed lambda line — history wipes the chart
+      if (state.lambda_history.length) setLiqLambdaData(state.lambda_history);
       scrollToLatest();
-      // Refresh bar delta from last bar after history reload
       const lastBar = state.delta_bars.at(-1);
       if (lastBar) updateBarDelta(lastBar.delta);
       prependLogItem({ msg: `History loaded: ${state.candles.length} candles \u00b7 ${state.symbol} ${state.timeframe}`, type: 'info', ts: Date.now() });
@@ -370,6 +369,17 @@ onMessage((msg: ServerMsg) => {
       if (impactTabVisible()) {
         updateImpact(msg.observations, msg.stats);
       }
+      break;
+    }
+
+    case 'lambda': {
+      // Only process lambda for the active symbol
+      if (msg.sym !== state.symbol) break;
+      // Rolling history — keep last 500 points (~40min at 5s intervals)
+      state.lambda_history.push({ ts: msg.ts, ratio: msg.ratio });
+      if (state.lambda_history.length > 500) state.lambda_history.shift();
+      // Update the live line on the liq chart
+      updateLiqLambdaPoint(msg.ts, msg.ratio);
       break;
     }
 
