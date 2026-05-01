@@ -1,60 +1,26 @@
-"""Cascade Impact recorder — with SQLite persistence.
+"""Cascade Impact recorder — with SQLite persistence and Kyle's lambda.
 
-Algorithm
----------
-Two completely separate components:
+Changes from v1
+---------------
+1. compute_terminal_price() receives lambda_now from the KyleLambda estimator
+   on every tick, making the L2 walk lambda-aware (depth discounted by ratio).
 
-1. Tank (liq_remaining)
-   Updated every 50ms tick using real per-tick market flow:
-       liq_remaining = max(0, liq_remaining - max(0, direction * delta_tick))
-   delta_tick = increment of net buy/sell flow in this 50ms window only.
-   Long liq: positive delta_tick (net buying) drains the tank.
-   Short liq: negative delta_tick (net selling) drains the tank.
-   Amplifying flow (same direction as forced flow) has no effect on the tank.
-   Only counter-flow drains it. Only on_liquidation() can refill it.
-   The bucket walk NEVER modifies liq_remaining.
+2. initial_expected_price is computed against the lambda-discounted walk at
+   onset. l2_structural_price stores the raw walk result (lambda_ratio=1.0)
+   for model evaluation.
 
-   delta_tick is derived from sym_impact_delta, which is a monotonically
-   accumulating counter that never resets. This prevents phantom tank
-   inflation at second boundaries that would occur with sym_snapshot_delta.
+3. lambda_ratio_at_onset is stored in the observation for calibration.
 
-   If a new liquidation arrives within the silence window, the tank is
-   refilled: liq_remaining += new_usd_val. The tank_empty markers are
-   reset so they get re-recorded at the next true depletion.
+4. Close condition: observation closes only when BOTH:
+   - silence: now - last_liq_ts > SILENCE_WINDOW_S (unchanged)
+   - flow_normal: cascade_armed == False from KyleLambda estimator
+   This stitches multi-minute cascades across quiet gaps where lambda stays
+   elevated even with no liquidation events arriving.
 
-2. Bucket walk (read-only prediction)
-   Given the current liq_remaining, walks L2 buckets to predict the
-   terminal price. Changes no state whatsoever.
+5. Hard cap: observations older than MAX_OBS_DURATION_S close unconditionally.
 
-   Before each walk, L2Model.flush_dirty() is called to apply any pending
-   WS depth diffs to the composite book. This ensures the walk always sees
-   the freshest possible orderbook state. The duration of flush_dirty() is
-   measured with time.perf_counter() and stored in app_state.snapshot_calc_us
-   for broadcast to the frontend perf display.
-
-Key field definitions
----------------------
-entry_price             — price when the first liquidation fired (START)
-initial_expected_price  — first bucket walk prediction when liq fires
-final_expected_price    — bucket walk prediction at the exact tick
-                          liq_remaining first hits zero
-tank_empty_ts           — wall-clock timestamp when liq_remaining → 0
-tank_empty_price        — real market price at that moment (END)
-price_difference        — tank_empty_price - entry_price (actual move)
-cascade_duration_s      — tank_empty_ts - obs.timestamp
-price_error_pct         — how far off the initial prediction was relative to
-                          the actual predicted move size:
-                          (initial_expected - final_expected)
-                          / (final_expected - entry_price) * 100
-                          0% = perfect prediction, 20% = off by one fifth, etc.
-absorbed_by_delta       — the market instantly ate the liq: counter-flow in
-                          the very first tick alone >= initial_liq_volume,
-                          AND cascade_size == 1 (refilled cascades are never
-                          absorbed — they survived long enough to attract more
-                          liquidations).
-
-Observation closes only on silence_expired (30s no new liq).
-Tank hitting zero does NOT close — a new cluster may refill it.
+Everything else — tank mechanics, delta drain, series recording, DB
+persistence — is unchanged from v1.
 """
 from __future__ import annotations
 
@@ -74,10 +40,11 @@ import db.database as _db
 
 log = logging.getLogger("liqterm.impact")
 
-SILENCE_WINDOW_S    = 30.0
-MIN_LIQ_USD         = 1_000
-TICK_INTERVAL_S     = 0.05   # 50ms — pure compute cadence
-BROADCAST_INTERVAL_S = 0.2   # 200ms — frontend push cadence
+SILENCE_WINDOW_S     = 30.0
+MAX_OBS_DURATION_S   = 300.0   # hard cap — never let an obs run longer than 5min
+MIN_LIQ_USD          = 1_000
+TICK_INTERVAL_S      = 0.05
+BROADCAST_INTERVAL_S = 0.2
 
 _INSERT_SQL = """
 INSERT OR REPLACE INTO cascade_observations (
@@ -88,7 +55,8 @@ INSERT OR REPLACE INTO cascade_observations (
     actual_terminal_price, price_error_pct,
     cascade_duration_s, absorbed_by_delta,
     delta_series, expected_price_series, price_series,
-    liq_remaining_series, cascade_events_json, label_filled
+    liq_remaining_series, cascade_events_json, label_filled,
+    lambda_ratio_at_onset, l2_structural_price
 ) VALUES (
     :obs_id, :asset, :timestamp, :entry_price, :side, :exchange,
     :cascade_size, :initial_liq_volume, :initial_delta, :initial_expected_price,
@@ -97,7 +65,8 @@ INSERT OR REPLACE INTO cascade_observations (
     :actual_terminal_price, :price_error_pct,
     :cascade_duration_s, :absorbed_by_delta,
     :delta_series, :expected_price_series, :price_series,
-    :liq_remaining_series, :cascade_events_json, :label_filled
+    :liq_remaining_series, :cascade_events_json, :label_filled,
+    :lambda_ratio_at_onset, :l2_structural_price
 )
 """
 
@@ -117,15 +86,6 @@ def _jload(val) -> list:
 
 
 def _price_error(initial_expected: float, final_expected: float, entry_price: float) -> float | None:
-    """How far off the initial prediction was, as a fraction of the actual predicted move.
-
-    Formula: (initial_expected - final_expected) / (final_expected - entry_price) * 100
-
-    0%  = model nailed it (initial == final prediction)
-    20% = initial was off by one fifth of the actual move size
-
-    Returns None if the predicted move is zero (flat/no-move prediction).
-    """
     move = final_expected - entry_price
     if move == 0.0:
         return None
@@ -133,27 +93,12 @@ def _price_error(initial_expected: float, final_expected: float, entry_price: fl
 
 
 def _is_absorbed(side: str, cascade_size: int, initial_liq_volume: float, delta_series: list) -> bool:
-    """True if the market instantly ate the liq in the very first tick.
-
-    Conditions (all must be true):
-      1. cascade_size == 1: refilled cascades survived long enough to attract
-         more liquidations, so they were never instantly absorbed.
-      2. First delta tick was counter-flow (opposite to the forced direction).
-      3. That single tick's counter-flow magnitude >= initial_liq_volume.
-
-    Sign convention (matches _tick_all tank drain):
-      Long liq (direction=+1): positive delta_tick is counter-flow (net buying
-        absorbs forced selling). counter_flow = +1 * positive_delta > 0. ✓
-      Short liq (direction=-1): negative delta_tick is counter-flow (net selling
-        absorbs forced buying). counter_flow = -1 * negative_delta > 0. ✓
-    """
     if cascade_size > 1:
         return False
     if not delta_series:
         return False
     first_delta_tick = delta_series[0][1]
     direction = 1.0 if side == "long" else -1.0
-    # No negation: direction * delta_tick is positive when flow opposes forced order.
     counter_flow = direction * first_delta_tick
     return counter_flow >= initial_liq_volume
 
@@ -187,6 +132,8 @@ def _obs_to_db_row(obs: dict) -> dict:
         "liq_remaining_series":   _jdump(obs.get("liq_remaining_series")),
         "cascade_events_json":    _jdump(obs.get("cascade_events")),
         "label_filled":           obs.get("label_filled", 1),
+        "lambda_ratio_at_onset":  obs.get("lambda_ratio_at_onset"),
+        "l2_structural_price":    obs.get("l2_structural_price"),
     }
 
 
@@ -219,6 +166,8 @@ def _db_row_to_obs(row: dict) -> dict:
         "liq_remaining_series":   _jload(row.get("liq_remaining_series")),
         "cascade_events":         _jload(row.get("cascade_events_json")),
         "label_filled":           row.get("label_filled", 1),
+        "lambda_ratio_at_onset":  row.get("lambda_ratio_at_onset"),
+        "l2_structural_price":    row.get("l2_structural_price"),
         "beyond_cutoff":          False,
         "cutoff_price":           None,
         "_last_delta":            0.0,
@@ -298,11 +247,9 @@ class ImpactRecorder:
             active["total_liq_volume"] += usd_val
             active["last_liq_ts"]       = now
             active["liq_remaining"]    += usd_val
-            # Reset _last_delta to the current monotonic counter so the next
-            # tick computes a clean delta_tick from this baseline.
             active["_last_delta"]       = self._s.sym_impact_delta.get(sym, 0.0)
             active["cascade_events"].append([now, usd_val, exchange])
-            # Reset tank-empty markers — tank is alive again
+            # Reset tank-empty markers
             active["tank_empty_ts"]        = None
             active["tank_empty_price"]     = None
             active["final_expected_price"] = None
@@ -315,17 +262,27 @@ class ImpactRecorder:
                 await self._close_obs(sym)
 
             current_delta = self._s.sym_impact_delta.get(sym, 0.0)
-            # Flush dirty L2 diffs before the initial prediction so the first
-            # bucket walk sees the same fresh book state as all subsequent ticks.
-            # This also ensures initial_expected_price and the first chart point
-            # are computed from the same book snapshot.
+
             if hasattr(self._l2, "flush_dirty"):
                 self._l2.flush_dirty()
-            # Pass the liquidation fill price as ref_price so the model starts
-            # its walk from the actual current market price, not the stale
-            # snapshot mid. This also filters out book levels that were already
-            # consumed by the market move that brought price to this point.
-            res = self._l2.compute_terminal_price(usd_val, side, sym=sym, ref_price=price)
+
+            # ── Read current lambda ──────────────────────────────────────────
+            estimator  = self._s.kyle_lambdas.get(sym)
+            lam_result = estimator.current() if estimator else None
+            lambda_now  = lam_result.lambda_now  if lam_result else None
+            lambda_ratio = lam_result.ratio      if lam_result else 1.0
+
+            # ── Structural prediction (lambda_ratio = 1.0, raw book walk) ────
+            res_structural = self._l2.compute_terminal_price(
+                usd_val, side, sym=sym, ref_price=price,
+                lambda_now=None,   # no lambda scaling → pure structural estimate
+            )
+
+            # ── Lambda-aware prediction (unified model) ───────────────────────
+            res = self._l2.compute_terminal_price(
+                usd_val, side, sym=sym, ref_price=price,
+                lambda_now=lambda_now,
+            )
 
             obs = {
                 "id":                     _gen_id(),
@@ -338,6 +295,8 @@ class ImpactRecorder:
                 "initial_liq_volume":     usd_val,
                 "initial_delta":          current_delta,
                 "initial_expected_price": res["terminal_price"],
+                "l2_structural_price":    res_structural["terminal_price"],
+                "lambda_ratio_at_onset":  round(lambda_ratio, 4),
                 "total_liq_volume":       usd_val,
                 "liq_remaining":          usd_val,
                 "last_liq_ts":            now,
@@ -364,7 +323,6 @@ class ImpactRecorder:
         await self._broadcast_table_update()
 
     async def _tick_loop(self):
-        """Runs at TICK_INTERVAL_S (50ms) for compute; broadcasts at BROADCAST_INTERVAL_S (200ms)."""
         last_broadcast = 0.0
         while True:
             await asyncio.sleep(TICK_INTERVAL_S)
@@ -381,9 +339,6 @@ class ImpactRecorder:
         now      = time.time()
         to_close = []
 
-        # Flush any pending WS depth diffs into the composite buckets before
-        # the walk. Measure the duration with perf_counter and store it on
-        # app_state so the latency broadcast loop can forward it to the frontend.
         if hasattr(self._l2, "flush_dirty"):
             _t0 = time.perf_counter()
             self._l2.flush_dirty()
@@ -392,18 +347,11 @@ class ImpactRecorder:
         for sym, obs in list(self.active.items()):
             sym_price = self._s.sym_price.get(sym) or self._s.price
 
-            # Fix 1: no live price means the feed is not ready yet (cold start
-            # or a brief WS reconnect gap). Skip this tick entirely rather than
-            # passing 0.0 as ref_price, which would make compute_terminal_price
-            # return terminal_price=0 and corrupt expected_price_series.
             if not sym_price:
                 log.debug("_tick_all: no price for %s, skipping tick", sym)
                 continue
 
-            # Step 1: Update the tank with this tick's real market flow.
-            # sym_impact_delta is a monotonic counter (never resets), so
-            # differencing it always yields a small, correct per-tick value
-            # with no phantom spikes at second boundaries.
+            # ── Tank drain (unchanged) ───────────────────────────────────────
             current_delta  = self._s.sym_impact_delta.get(sym, 0.0)
             last_delta     = obs.get("_last_delta", current_delta)
             delta_tick     = current_delta - last_delta
@@ -412,33 +360,24 @@ class ImpactRecorder:
             direction      = 1.0 if obs["side"] == "long" else -1.0
             prev_remaining = obs["liq_remaining"]
 
-            # Guard: once liq_remaining hits zero the tank is dead.
-            # Ordinary market flow must not re-inflate it — only a real
-            # on_liquidation() call (a genuine new liq event) may do that.
-            # Drain is one-directional: only counter-flow (direction * delta_tick > 0)
-            # reduces liq_remaining. Amplifying flow (direction * delta_tick < 0)
-            # is clamped to 0 — it has no effect.
-            # Tank can only grow via on_liquidation() adding real usd_val.
             if obs["liq_remaining"] > 0:
                 obs["liq_remaining"] = max(
                     0.0,
                     obs["liq_remaining"] - max(0.0, direction * delta_tick)
                 )
 
-            # Step 2: Read-only bucket walk — purely a prediction.
-            # Pass sym_price as ref_price so the walk starts from the actual
-            # live market price, not the stale REST snapshot mid.
-            # Fix 2: pass None instead of 0.0 when sym_price is falsy so that
-            # compute_terminal_price uses its own internal fallback rather than
-            # treating 0.0 as a valid price (0.0 is not None in Python, so the
-            # existing `if ref_price is not None` guard inside the model would
-            # accept it, set mid=0, and return terminal_price=0).
+            # ── Lambda-aware bucket walk ─────────────────────────────────────
+            estimator  = self._s.kyle_lambdas.get(sym)
+            lam_result = estimator.current() if estimator else None
+            lambda_now  = lam_result.lambda_now if lam_result else None
+
             res = self._l2.compute_terminal_price(
                 obs["liq_remaining"], obs["side"], sym=sym,
-                ref_price=sym_price if sym_price else None
+                ref_price=sym_price if sym_price else None,
+                lambda_now=lambda_now,
             )
 
-            # Step 3: Record the exact moment the tank first hits zero.
+            # ── Tank-empty recording (unchanged) ────────────────────────────
             if (
                 obs["liq_remaining"] == 0.0
                 and prev_remaining > 0.0
@@ -461,7 +400,7 @@ class ImpactRecorder:
                     obs["delta_series"],
                 )
 
-            # Record time series
+            # ── Series recording (unchanged) ─────────────────────────────────
             obs["delta_series"].append([now, delta_tick])
             obs["expected_price_series"].append([now, res["terminal_price"]])
             obs["price_series"].append([now, sym_price])
@@ -472,8 +411,17 @@ class ImpactRecorder:
             if res["cutoff_price"] is not None:
                 obs["cutoff_price"] = res["cutoff_price"]
 
-            # Only silence closes the observation
-            if now - obs["last_liq_ts"] > SILENCE_WINDOW_S:
+            # ── Extended close condition ─────────────────────────────────────
+            # Close only when BOTH conditions hold:
+            #   1. silence: no liquidation for SILENCE_WINDOW_S
+            #   2. flow_normal: lambda estimator is no longer armed
+            # This keeps multi-minute cascades open during quiet gaps where
+            # lambda stays elevated even with no liquidation events arriving.
+            silence     = now - obs["last_liq_ts"] > SILENCE_WINDOW_S
+            flow_normal = (lam_result is None) or (not lam_result.cascade_armed)
+            hard_cap    = now - obs["timestamp"] > MAX_OBS_DURATION_S
+
+            if hard_cap or (silence and flow_normal):
                 to_close.append(sym)
 
         for sym in to_close:
@@ -502,7 +450,6 @@ class ImpactRecorder:
                 obs["final_expected_price"],
                 obs["entry_price"],
             )
-            # Tank never emptied — not absorbed, the liq just expired
             obs["absorbed_by_delta"] = False
 
         obs.pop("_last_delta", None)
@@ -530,6 +477,8 @@ class ImpactRecorder:
             "cascade_events":        [[ts(t), v, ex] for t, v, ex in obs["cascade_events"]],
             "beyond_cutoff":         obs.get("beyond_cutoff", False),
             "cutoff_price":          obs.get("cutoff_price"),
+            "lambda_ratio_at_onset": obs.get("lambda_ratio_at_onset"),
+            "l2_structural_price":   obs.get("l2_structural_price"),
         }
 
     async def _broadcast_table_update(self):
